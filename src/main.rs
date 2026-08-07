@@ -111,6 +111,7 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
     let mut buf = vec![0u8; CHUNK];
     let mut old = if skip_same { vec![0u8; CHUNK] } else { Vec::new() };
     let (mut done, mut written) = (0u64, 0u64);
+    let (mut short, mut blank) = (0u64, 0u64);
     let mut last_pct = u64::MAX;
     while done < total {
         let want = ((total - done) as usize).min(CHUNK);
@@ -130,7 +131,19 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
         }
 
         dst.seek(dst_off + done).ctx("target")?;
-        let same = skip_same && dst.read(&mut old[..n]).ctx("target readback")? == n && old[..n] == buf[..n];
+        let same = if skip_same {
+            let got = dst.read(&mut old[..n]).ctx("target readback")?;
+            // Separate "the readback did not work" from "the bytes really
+            // differ" -- both look like a changed block otherwise.
+            if got != n {
+                short += 1;
+            } else if old[..n].iter().all(|&b| b == 0) && buf[..n].iter().any(|&b| b != 0) {
+                blank += 1;
+            }
+            got == n && old[..n] == buf[..n]
+        } else {
+            false
+        };
         if !same {
             dst.seek(dst_off + done).ctx("target")?;
             dst.write_all(&buf[..n]).ctx("target")?;
@@ -146,7 +159,13 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
         }
     }
     eprintln!();
-    if skip_same { eprintln!("[*] {} changed", human(written)); }
+    if skip_same {
+        eprintln!("[*] {} changed", human(written));
+        if short > 0 || blank > 0 {
+            eprintln!("[!] readback degraded: {short} short, {blank} blank where the source was not");
+            eprintln!("[!] the parent chain is not being served -- this is a full copy, not a delta");
+        }
+    }
     Ok(())
 }
 
@@ -216,6 +235,7 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
          Set-Disk -Number {disk} -IsReadOnly $false"
     ))?;
 
+    eprintln!("[*] disk {disk} partition at offset {offset} ({})", human(part_size));
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
     copy(&src, &dst, offset, vol_size, parent.is_some())?;
     drop(dst);

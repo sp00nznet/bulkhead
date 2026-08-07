@@ -62,7 +62,11 @@ try {
     & $exe image "${srcLetter}:" $img
     if ($LASTEXITCODE -ne 0) { throw "image failed" }
 
-    Write-Host "`n[*] bulkhead image --from (incremental, nothing changed yet)"
+    # change one small file, so "changed" has a known expected magnitude:
+    # a few MB of NTFS metadata churn, not the whole volume
+    "second payload" | Set-Content "${srcLetter}:\second.txt"
+
+    Write-Host "`n[*] bulkhead image --from (incremental, one small file added)"
     & $exe image "${srcLetter}:" $inc --from $img
     if ($LASTEXITCODE -ne 0) { throw "incremental failed" }
 
