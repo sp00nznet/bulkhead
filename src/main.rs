@@ -29,6 +29,11 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 const MB: u64 = 1 << 20;
 const CHUNK: usize = 4 << 20;
 
+/// Comparison granularity for incrementals. Small enough that a few changed
+/// bytes do not drag a whole chunk along, large enough that the run list stays
+/// short. ponytail: picked, not measured -- tune against a real workload.
+const GRAIN: usize = 64 << 10;
+
 /// GPT "Basic data partition". We tag the payload partition with it so we can
 /// find it again on an incremental without tripping over the Microsoft
 /// Reserved partition that Initialize-Disk creates alongside it.
@@ -99,6 +104,33 @@ impl Raw {
     }
 }
 
+/// Byte ranges of `new` that differ from `old`, compared in `grain` steps and
+/// coalesced into runs. An empty `old` means everything differs, so a full copy
+/// comes back as a single run and costs one write.
+///
+/// The granularity is the whole point: compare a 4 MiB chunk as one unit and a
+/// single changed byte of NTFS metadata dirties all 4 MiB, which on a quiet
+/// volume marks nearly the entire disk as changed.
+fn diff_runs(old: &[u8], new: &[u8], grain: usize) -> Vec<(usize, usize)> {
+    let n = new.len();
+    let mut runs = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut i = 0usize;
+    loop {
+        let at_end = i >= n;
+        let e = (i + grain).min(n);
+        let differs = !at_end && (old.len() < e || old[i..e] != new[i..e]);
+        match (differs, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => { runs.push((s, i)); start = None; }
+            _ => {}
+        }
+        if at_end { break; }
+        i = e;
+    }
+    runs
+}
+
 /// Copy `total` bytes from the start of `src` to `dst` at `dst_off`.
 ///
 /// `skip_same` is what makes an incremental incremental: a differencing VHDX
@@ -131,8 +163,8 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
             break;
         }
 
-        dst.seek(dst_off + done).ctx("target")?;
-        let same = if skip_same {
+        let compare = if skip_same {
+            dst.seek(dst_off + done).ctx("target")?;
             let got = dst.read(&mut old[..n]).ctx("target readback")?;
             // Separate "the readback did not work" from "the bytes really
             // differ" -- both look like a changed block otherwise.
@@ -141,23 +173,25 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
             } else if old[..n].iter().all(|&b| b == 0) && buf[..n].iter().any(|&b| b != 0) {
                 blank += 1;
             }
-            got == n && old[..n] == buf[..n]
+            got == n
         } else {
             false
         };
-        if !same {
-            if skip_same && first_diff.is_none() {
-                let i = old[..n].iter().zip(&buf[..n]).position(|(a, b)| a != b).unwrap_or(0);
-                let hex = |s: &[u8]| s.iter().map(|b| format!("{b:02x}")).collect::<String>();
-                let end = (i + 16).min(n);
+
+        let cmp: &[u8] = if compare { &old[..n] } else { &[] };
+        for (s, e) in diff_runs(cmp, &buf[..n], GRAIN) {
+            if compare && first_diff.is_none() {
+                let d = s + old[s..e].iter().zip(&buf[s..e]).position(|(a, b)| a != b).unwrap_or(0);
+                let hex = |x: &[u8]| x.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                let t = (d + 16).min(n);
                 first_diff = Some(format!(
                     "at {} target={} source={}",
-                    dst_off + done + i as u64, hex(&old[i..end]), hex(&buf[i..end])
+                    dst_off + done + d as u64, hex(&old[d..t]), hex(&buf[d..t])
                 ));
             }
-            dst.seek(dst_off + done).ctx("target")?;
-            dst.write_all(&buf[..n]).ctx("target")?;
-            written += n as u64;
+            dst.seek(dst_off + done + s as u64).ctx("target")?;
+            dst.write_all(&buf[s..e]).ctx("target")?;
+            written += (e - s) as u64;
         }
 
         done += n as u64;
@@ -354,6 +388,31 @@ mod tests {
         Vhd::open(&child, true).expect("open differencing child for attach");
         assert!(std::fs::metadata(&child).unwrap().len() > 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn runs() {
+        let a = vec![0u8; 400];
+        // identical -> nothing to write
+        assert_eq!(diff_runs(&a, &a, 100), vec![]);
+        // no readback -> one run covering everything, so a full copy is 1 write
+        assert_eq!(diff_runs(&[], &a, 100), vec![(0, 400)]);
+
+        // one changed byte dirties its grain only
+        let mut b = a.clone();
+        b[150] = 1;
+        assert_eq!(diff_runs(&a, &b, 100), vec![(100, 200)]);
+
+        // adjacent dirty grains coalesce into a single run
+        let mut c = a.clone();
+        c[150] = 1;
+        c[250] = 1;
+        assert_eq!(diff_runs(&a, &c, 100), vec![(100, 300)]);
+
+        // a dirty grain at the very end is still flushed, and is short
+        let mut d = vec![0u8; 250];
+        d[240] = 1;
+        assert_eq!(diff_runs(&a[..250], &d, 100), vec![(200, 250)]);
     }
 
     #[test]
