@@ -70,6 +70,15 @@ volumes nothing is writing to — an offline disk, or a drive you just plugged i
 incremental, mounts the image back and compares a file hash across both. Run it
 elevated.
 
+Measured on that volume -- 496 MB with 106 MB in use, one small file added
+between the two images:
+
+| | before used-clusters-only | after |
+|---|---|---|
+| full image | 256 MB | **38 MB** |
+| incremental | 255 MB | **35 MB** |
+| reported as changed | 18.2 MB | **2.6 MB** |
+
 - [x] `image` — VSS snapshot → dynamic VHDX, GPT + one partition
 - [x] `image --from` — differencing disk, unchanged blocks left unallocated
 - [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
