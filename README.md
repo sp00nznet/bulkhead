@@ -47,6 +47,7 @@ target\release\bulkhead.exe
 bulkhead image <VOL> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
 bulkhead mount <IMAGE.vhdx> [--rw]
 bulkhead unmount <IMAGE.vhdx>
+bulkhead media <OUT.iso>
 ```
 
 ```powershell
@@ -63,6 +64,25 @@ bulkhead unmount D:\backups\c-mon.vhdx
 
 `--no-snapshot` reads the volume directly instead of through VSS. Only for
 volumes nothing is writing to — an offline disk, or a drive you just plugged in.
+
+### Recovery media
+
+```powershell
+bulkhead media D:ulkhead-recovery.iso
+```
+
+Builds bootable WinPE with bulkhead in it. Needs the **Windows ADK** and its
+**WinPE add-on** — two separate downloads from <https://aka.ms/adk>, because
+WinPE stopped shipping inside the ADK at 1809.
+
+WinPE has no PowerShell in its base image, and bulkhead partitions its target
+with the Storage cmdlets, so the media adds `WinPE-WMI`, `WinPE-NetFX`,
+`WinPE-Scripting`, `WinPE-PowerShell` and `WinPE-StorageWMI`. That is most of
+the build time and most of the ISO size.
+
+VSS does not exist in WinPE either, so imaging from the media is always
+`--no-snapshot`. That costs nothing: nothing in WinPE is writing to the disk
+you are imaging.
 
 ## Status
 
@@ -87,7 +107,7 @@ between the two images:
 - [ ] `restore` — write a partition back to a live disk
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
-- [ ] WinPE recovery media (`bulkhead media`), bootable from USB
+- [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
 - [ ] GUI
 
 ## Roadmap

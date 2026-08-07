@@ -4,6 +4,7 @@
 //! Windows already mounts one as a drive, already does differencing chains for
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
+mod media;
 mod snap;
 mod util;
 mod vhdx;
@@ -334,6 +335,10 @@ bulkhead -- block-level backup and recovery for Windows
 
   bulkhead unmount <IMAGE.vhdx>
 
+  bulkhead media <OUT.iso>
+      Build bootable WinPE recovery media with bulkhead in it.
+      Needs the Windows ADK and its separate WinPE add-on.
+
 Needs an elevated prompt (raw volume access).";
 
 /// Positional args, with `--flags` and `--from VALUE` removed.
@@ -361,6 +366,7 @@ fn main() {
         ["image", vol, out] => cmd_image(vol, out, !flag("--no-snapshot"), opt("--from")),
         ["mount", img] => cmd_mount(img, flag("--rw")),
         ["unmount", img] => cmd_unmount(img),
+        ["media", iso] => media::build(iso),
         _ => { eprintln!("{USAGE}"); std::process::exit(2); }
     };
     if let Err(e) = r {
