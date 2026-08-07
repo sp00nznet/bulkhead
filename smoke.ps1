@@ -14,7 +14,12 @@ $img  = Join-Path $work 'image.vhdx'
 $inc  = Join-Path $work 'image-inc.vhdx'
 $exe  = Join-Path $PSScriptRoot 'target\debug\bulkhead.exe'
 
-if (-not (Test-Path $exe)) { throw "build first: cargo build   (missing $exe)" }
+# Build here rather than trusting whatever is in target\ -- `cargo test` leaves
+# target\debug\bulkhead.exe stale, which silently tests the previous build.
+Push-Location $PSScriptRoot
+try { cargo build; if ($LASTEXITCODE -ne 0) { throw "cargo build failed" } }
+finally { Pop-Location }
+if (-not (Test-Path $exe)) { throw "missing $exe" }
 
 function Invoke-Diskpart($lines, [switch]$Quiet) {
     $f = Join-Path $env:TEMP 'bulkhead-dp.txt'
