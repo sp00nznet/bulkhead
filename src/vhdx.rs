@@ -27,7 +27,7 @@ impl Drop for Vhd {
 impl Vhd {
     /// Create a new dynamically-expanding VHDX. `size` is the virtual size.
     /// The handle is closed straight away -- attaching goes through `open`.
-    pub fn create(path: &str, size: u64) -> Res<()> {
+    pub fn create(path: &str, size: u64, sector: u32) -> Res<()> {
         let w = wide(path);
         let mut p = CREATE_VIRTUAL_DISK_PARAMETERS::default();
         p.Version = CREATE_VIRTUAL_DISK_VERSION_2;
@@ -37,8 +37,8 @@ impl Vhd {
         // turns 18 MB of scattered changes into a 256 MB incremental. Costs a
         // bigger block allocation table on the full image.
         p.Anonymous.Version2.BlockSizeInBytes = 2 << 20;
-        p.Anonymous.Version2.SectorSizeInBytes = 512;
-        p.Anonymous.Version2.PhysicalSectorSizeInBytes = 512;
+        p.Anonymous.Version2.SectorSizeInBytes = sector;
+        p.Anonymous.Version2.PhysicalSectorSizeInBytes = sector;
         let mut h = HANDLE::default();
         unsafe {
             CreateVirtualDisk(

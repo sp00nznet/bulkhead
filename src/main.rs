@@ -19,7 +19,10 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::Ioctl::{GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO};
+use windows::Win32::System::Ioctl::{
+    DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
+    IOCTL_DISK_GET_LENGTH_INFO,
+};
 use windows::Win32::System::IO::DeviceIoControl;
 
 use bitmap::Bitmap;
@@ -84,6 +87,21 @@ impl Raw {
         Ok(li.Length as u64)
     }
 
+    /// Logical bytes-per-sector. A whole-disk image must declare the source's
+    /// value or every LBA in the copied GPT points somewhere else.
+    fn sector_size(&self) -> Res<u32> {
+        let mut g = DISK_GEOMETRY::default();
+        let mut ret = 0u32;
+        unsafe {
+            DeviceIoControl(
+                self.0, IOCTL_DISK_GET_DRIVE_GEOMETRY, None, 0,
+                Some(&mut g as *mut _ as *mut c_void),
+                size_of::<DISK_GEOMETRY>() as u32, Some(&mut ret), None,
+            ).ctx("IOCTL_DISK_GET_DRIVE_GEOMETRY")?;
+        }
+        Ok(g.BytesPerSector)
+    }
+
     fn seek(&self, off: u64) -> Res<()> {
         unsafe { SetFilePointerEx(self.0, off as i64, None, FILE_BEGIN).ctx("seek")?; }
         Ok(())
@@ -134,94 +152,257 @@ fn diff_runs(old: &[u8], new: &[u8], grain: usize) -> Vec<(usize, usize)> {
     runs
 }
 
-/// Copy `total` bytes from the start of `src` to `dst` at `dst_off`.
+/// One region of a copy: `len` bytes from `src` at `src_off`, landing on `dst`
+/// at `dst_off`. A volume image is a single region; a whole-disk image is one
+/// per partition plus one per gap between them.
+struct Region<'a> {
+    src: &'a Raw,
+    src_off: u64,
+    dst: &'a Raw,
+    dst_off: u64,
+    len: u64,
+    /// Compare against what is already there and write only what differs. This
+    /// is what makes an incremental incremental: a differencing VHDX serves the
+    /// parent's content for any block it has not been written to, so unchanged
+    /// blocks stay unallocated in the child.
+    /// ponytail: read-compare costs a full read of the parent. The upgrade is
+    /// changed-block tracking (a filter driver), which is a lot of driver for
+    /// something that is I/O-bound either way.
+    delta: bool,
+    /// Clusters the filesystem says are free are not read and not written.
+    alloc: Option<&'a Bitmap>,
+    /// How much of the tail may be unreadable before it counts as truncation.
+    /// A volume serves slightly less than it reports; a raw disk does not, and
+    /// its last sectors hold the backup GPT -- so this is 0 for raw regions.
+    tail_slack: u64,
+    label: &'a str,
+}
+
+impl Region<'_> {
+    fn run(&self) -> Res<()> {
+        let total = self.len;
+        let mut buf = vec![0u8; CHUNK];
+        let mut old = if self.delta { vec![0u8; CHUNK] } else { Vec::new() };
+        let (mut done, mut written, mut skipped) = (0u64, 0u64, 0u64);
+        let mut short = 0u64;
+        let mut last_pct = u64::MAX;
+
+        eprintln!("[*] {} ({})", self.label, human(total));
+        while done < total {
+            let pct = done * 100 / total;
+            if pct != last_pct {
+                eprint!("
+  {pct:3}%  {} / {}", human(done), human(total));
+                let _ = std::io::stderr().flush();
+                last_pct = pct;
+            }
+            let want = ((total - done) as usize).min(CHUNK);
+
+            // Free space holds nothing worth copying. Skipping means not even
+            // reading it, which is where the time goes on a mostly-empty disk.
+            // ponytail: whole chunks only, so free space in runs shorter than
+            // 4 MiB is still copied. Drop to GRAIN if that shows up.
+            if self.alloc.is_some_and(|b| !b.any_allocated(done, done + want as u64)) {
+                done += want as u64;
+                skipped += want as u64;
+                continue;
+            }
+
+            // Explicit, because a skipped chunk leaves the pointer behind.
+            self.src.seek(self.src_off + done).ctx("source")?;
+            let n = self.src.read(&mut buf[..want]).ctx("source")?;
+            if n == 0 {
+                // A volume reports its partition length but serves reads only
+                // to the filesystem's own end, and refuses a straddling read
+                // outright rather than returning a partial. Tolerate that at
+                // the tail only; anywhere else a zero read is a truncated
+                // image and must not pass silently.
+                if total - done > self.tail_slack {
+                    return Err(format!(
+                        "{}: source ended early at {done} of {total}", self.label).into());
+                }
+                eprintln!("
+[*] last {} not served by the volume driver; left zeroed",
+                          human(total - done));
+                break;
+            }
+
+            let compare = if self.delta {
+                self.dst.seek(self.dst_off + done).ctx("target")?;
+                let got = self.dst.read(&mut old[..n]).ctx("target readback")?;
+                // A short readback is not wrong, just wasteful: the chunk gets
+                // written whole instead of by run.
+                if got != n {
+                    short += 1;
+                }
+                got == n
+            } else {
+                false
+            };
+
+            let cmp: &[u8] = if compare { &old[..n] } else { &[] };
+            for (s, e) in diff_runs(cmp, &buf[..n], GRAIN) {
+                self.dst.seek(self.dst_off + done + s as u64).ctx("target")?;
+                self.dst.write_all(&buf[s..e]).ctx("target")?;
+                written += (e - s) as u64;
+            }
+
+            done += n as u64;
+        }
+        eprintln!("
+  100%  {} / {}      ", human(done), human(total));
+        if let Some(b) = self.alloc {
+            eprintln!("    {} free space skipped ({} of {} clusters in use)",
+                      human(skipped), b.allocated, b.clusters);
+        }
+        if self.delta {
+            eprintln!("    {} changed", human(written));
+            if short > 0 {
+                eprintln!("[!] {short} chunks could not be read back and were copied whole");
+            }
+        }
+        Ok(())
+    }
+}
+
+
+/// `disk0`, `0`, or `\.\PhysicalDrive0` -- anything else is a volume.
+fn disk_arg(s: &str) -> Option<u32> {
+    let t = s.to_ascii_lowercase();
+    let d = t.strip_prefix(r"\.\physicaldrive")
+        .or_else(|| t.strip_prefix("disk"))
+        .unwrap_or(&t);
+    if d.is_empty() { return None; }
+    d.parse().ok()
+}
+
+struct Part {
+    offset: u64,
+    size: u64,
+    /// Present only if Windows has the volume mounted, which is what makes it
+    /// snapshottable. ESP, MSR and recovery partitions have none.
+    letter: Option<char>,
+}
+
+fn partitions(disk: u32) -> Res<Vec<Part>> {
+    let out = ps(&format!(
+        "Get-Partition -DiskNumber {disk} | Sort-Object Offset |          ForEach-Object {{ \"$($_.Offset) $($_.Size) $($_.DriveLetter)\" }}"
+    ))?;
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 2 { continue; }
+        v.push(Part {
+            offset: f[0].parse()?,
+            size: f[1].parse()?,
+            letter: f.get(2).and_then(|s| s.chars().next()).filter(|c| c.is_ascii_alphabetic()),
+        });
+    }
+    Ok(v)
+}
+
+/// Image a whole disk: the partition table, every partition, and the gaps.
 ///
-/// `skip_same` is what makes an incremental incremental: a differencing VHDX
-/// serves the parent's content for any block it has not been written to, so
-/// comparing before writing leaves unchanged blocks unallocated in the child.
-/// ponytail: read-compare costs a full read of the parent. The upgrade is
-/// changed-block tracking (a filter driver), which is a lot of driver for a
-/// feature that is I/O-bound either way.
-fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool,
-        alloc: Option<&Bitmap>) -> Res<()> {
-    let mut buf = vec![0u8; CHUNK];
-    let mut old = if skip_same { vec![0u8; CHUNK] } else { Vec::new() };
-    let (mut done, mut written, mut skipped) = (0u64, 0u64, 0u64);
-    let mut short = 0u64;
-    let mut last_pct = u64::MAX;
-    while done < total {
-        let pct = done * 100 / total;
-        if pct != last_pct {
-            eprint!("\r  {pct:3}%  {} / {}", human(done), human(total));
-            let _ = std::io::stderr().flush();
-            last_pct = pct;
-        }
-        let want = ((total - done) as usize).min(CHUNK);
+/// Mounted volumes are read through their own VSS snapshot so a live system
+/// stays consistent; everything else is copied raw. The GPT is copied verbatim
+/// rather than rebuilt, so the VHDX is the same size as the source and its
+/// backup GPT lands on the same LBA -- which is what makes the image directly
+/// bootable instead of merely restorable.
+fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<()> {
+    let phys_path = format!(r"\.\PhysicalDrive{disk}");
+    let phys = Raw::open(&phys_path, false).ctx("open source disk")?;
+    let disk_size = phys.len()?;
+    let sector = phys.sector_size()?;
+    eprintln!("[*] source {phys_path} ({}, {sector}-byte sectors)", human(disk_size));
 
-        // Free space holds nothing worth copying. Skipping means not even
-        // reading it, which is where the time goes on a mostly-empty disk.
-        // ponytail: whole chunks only, so free space in runs shorter than
-        // 4 MiB is still copied. Drop to GRAIN if that shows up as a problem.
-        if alloc.is_some_and(|b| !b.any_allocated(done, done + want as u64)) {
-            done += want as u64;
-            skipped += want as u64;
-            continue;
-        }
+    let parts = partitions(disk)?;
+    if parts.is_empty() {
+        return Err(format!("disk {disk} has no partitions").into());
+    }
 
-        // Explicit, because a skipped chunk leaves the file pointer behind.
-        src.seek(done).ctx("source")?;
-        let n = src.read(&mut buf[..want]).ctx("source")?;
-        if n == 0 {
-            // A volume reports its partition length but serves reads only to
-            // the filesystem's own end, which can be a few sectors short -- and
-            // it refuses a straddling read outright rather than returning a
-            // partial. Tolerate that at the tail only; anywhere else a zero
-            // read is a truncated image and must not pass silently.
-            if total - done > TAIL_SLACK {
-                return Err(format!("source ended early at {done} of {total}").into());
+    // Snapshot every mounted volume before copying anything, so the whole
+    // image is one point in time rather than one per partition.
+    let mut shadows: Vec<(usize, Snapshot)> = Vec::new();
+    if use_vss {
+        for (i, p) in parts.iter().enumerate() {
+            let Some(l) = p.letter else { continue };
+            eprintln!("[*] snapshotting {l}:");
+            match Snapshot::create(&format!("{l}:")) {
+                Ok(sn) => shadows.push((i, sn)),
+                Err(e) => eprintln!("[!] {l}: no snapshot ({e}); copying it raw instead"),
             }
-            eprintln!("\n[*] last {} not served by the volume driver; left zeroed",
-                      human(total - done));
-            break;
         }
+    }
 
-        let compare = if skip_same {
-            dst.seek(dst_off + done).ctx("target")?;
-            let got = dst.read(&mut old[..n]).ctx("target readback")?;
-            // A short readback is not wrong, just wasteful: the chunk gets
-            // written whole instead of by run.
-            if got != n {
-                short += 1;
+    let r = image_disk_inner(&phys, disk_size, sector, &parts, &shadows, out, parent);
+
+    for (_, sn) in &shadows {
+        if let Err(e) = sn.delete() {
+            eprintln!("[!] snapshot {} not released: {e}", sn.id);
+        }
+    }
+    r
+}
+
+fn image_disk_inner(phys: &Raw, disk_size: u64, sector: u32, parts: &[Part],
+                    shadows: &[(usize, Snapshot)], out: &str, parent: Option<&str>) -> Res<()> {
+    match parent {
+        Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)?; }
+        None => Vhd::create(out, disk_size, sector)?,
+    }
+    let vhd = Vhd::open(out, true)?;
+    vhd.attach(false, false, false)?;
+    let dnum = vhd.disk_number()?;
+    // No Initialize-Disk here: the source's own partition table is copied
+    // verbatim. Offline still matters, so nothing gets mounted mid-write.
+    ps(&format!(
+        "Set-Disk -Number {dnum} -IsOffline $true
+         Set-Disk -Number {dnum} -IsReadOnly $false"
+    ))?;
+    let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
+    let delta = parent.is_some();
+
+    let raw = |off: u64, len: u64, label: &str| -> Res<()> {
+        Region { src: phys, src_off: off, dst: &dst, dst_off: off, len,
+                 delta, alloc: None, tail_slack: 0, label }.run()
+    };
+
+    let mut pos = 0u64;
+    for (i, p) in parts.iter().enumerate() {
+        if p.offset > pos {
+            raw(pos, p.offset - pos, "gap")?;
+        }
+        match shadows.iter().find(|(j, _)| *j == i) {
+            Some((_, sn)) => {
+                let src = Raw::open(&sn.device, false).ctx("open snapshot")?;
+                let vol_size = src.len()?.min(p.size);
+                let alloc = bitmap::read(src.0, vol_size)?;
+                let label = format!("partition {} ({}:)", i + 1, p.letter.unwrap_or('?'));
+                Region { src: &src, src_off: 0, dst: &dst, dst_off: p.offset, len: vol_size,
+                         delta, alloc: alloc.as_ref(), tail_slack: TAIL_SLACK,
+                         label: &label }.run()?;
             }
-            got == n
-        } else {
-            false
-        };
-
-        let cmp: &[u8] = if compare { &old[..n] } else { &[] };
-        for (s, e) in diff_runs(cmp, &buf[..n], GRAIN) {
-            dst.seek(dst_off + done + s as u64).ctx("target")?;
-            dst.write_all(&buf[s..e]).ctx("target")?;
-            written += (e - s) as u64;
+            None => raw(p.offset, p.size, &format!("partition {} (raw)", i + 1))?,
         }
+        pos = p.offset + p.size;
+    }
+    if pos < disk_size {
+        // Includes the backup GPT on the last sectors, so it must not be
+        // skipped or truncated.
+        raw(pos, disk_size - pos, "tail + backup GPT")?;
+    }
 
-        done += n as u64;
-    }
-    eprintln!("\r  100%  {} / {}      ", human(done), human(total));
-    if let Some(b) = alloc {
-        eprintln!("[*] {} free space skipped ({} of {} clusters in use)",
-                  human(skipped), b.allocated, b.clusters);
-    }
-    if skip_same {
-        eprintln!("[*] {} changed", human(written));
-        if short > 0 {
-            eprintln!("[!] {short} chunks could not be read back and were copied whole");
-        }
-    }
+    drop(dst);
+    vhd.detach()?;
+    eprintln!("[+] {out}
+    mount it:  bulkhead mount {out}");
     Ok(())
 }
 
 fn cmd_image(volume: &str, out: &str, use_vss: bool, parent: Option<&str>) -> Res<()> {
+    if let Some(n) = disk_arg(volume) {
+        return image_disk(n, out, use_vss, parent);
+    }
     let shadow = if use_vss {
         eprintln!("[*] snapshotting {volume}");
         Some(Snapshot::create(volume)?)
@@ -262,7 +443,8 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     let disk_size = (vol_size + 40 * MB + MB - 1) / MB * MB;
     match parent {
         Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)?; }
-        None => Vhd::create(out, disk_size)?,
+        // Synthetic single-partition disk we lay out ourselves, so 512.
+        None => Vhd::create(out, disk_size, 512)?,
     }
     let vhd = Vhd::open(out, true)?;
     vhd.attach(false, false, false)?;
@@ -298,7 +480,11 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
 
     eprintln!("[*] disk {disk} partition at offset {offset} ({})", human(part_size));
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
-    copy(&src, &dst, offset, vol_size, parent.is_some(), alloc.as_ref())?;
+    Region {
+        src: &src, src_off: 0, dst: &dst, dst_off: offset, len: vol_size,
+        delta: parent.is_some(), alloc: alloc.as_ref(), tail_slack: TAIL_SLACK,
+        label: "volume",
+    }.run()?;
     drop(dst);
 
     vhd.detach()?;
@@ -402,7 +588,7 @@ mod tests {
         let parent = d.join("p.vhdx").to_string_lossy().into_owned();
         let child = d.join("c.vhdx").to_string_lossy().into_owned();
 
-        Vhd::create(&parent, 64 * MB).expect("create parent");
+        Vhd::create(&parent, 64 * MB, 512).expect("create parent");
         Vhd::create_diff(&child, &parent).expect("create differencing child");
         // the attach path opens with an explicit mask; that much is testable
         // unelevated, the attach itself is not
@@ -434,6 +620,19 @@ mod tests {
         let mut d = vec![0u8; 250];
         d[240] = 1;
         assert_eq!(diff_runs(&a[..250], &d, 100), vec![(200, 250)]);
+    }
+
+    #[test]
+    fn disk_vs_volume() {
+        assert_eq!(disk_arg("disk0"), Some(0));
+        assert_eq!(disk_arg("Disk12"), Some(12));
+        assert_eq!(disk_arg(r"\.\PhysicalDrive3"), Some(3));
+        assert_eq!(disk_arg("3"), Some(3));
+        // volumes must not be mistaken for disks
+        assert_eq!(disk_arg("C:"), None);
+        assert_eq!(disk_arg("C:\\"), None);
+        assert_eq!(disk_arg("disk"), None);
+        assert_eq!(disk_arg("diskX"), None);
     }
 
     #[test]

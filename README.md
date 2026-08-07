@@ -23,6 +23,7 @@ The format choice carries most of the feature list, so it's worth being explicit
 | What the paid tools charge for | What bulkhead does |
 |---|---|
 | Block-level snapshot of a live volume | `Win32_ShadowCopy` → read the shadow device raw |
+| Whole-disk image that boots | GPT copied verbatim; VHDX sized to match the source |
 | Incremental chains | VHDX **differencing disks** — Windows tracks the blocks |
 | Mount-image-as-a-drive | `AttachVirtualDisk` — it shows up in Explorer |
 | Bootable recovery media | WinPE (ADK) + a `startnet.cmd` |
@@ -44,7 +45,7 @@ target\release\bulkhead.exe
 ## Usage
 
 ```
-bulkhead image <VOL> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
+bulkhead image <VOL|diskN> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
 bulkhead mount <IMAGE.vhdx> [--rw]
 bulkhead unmount <IMAGE.vhdx>
 bulkhead media <OUT.iso>
@@ -99,7 +100,9 @@ between the two images:
 | incremental | 255 MB | **35 MB** |
 | reported as changed | 18.2 MB | **2.6 MB** |
 
-- [x] `image` — VSS snapshot → dynamic VHDX, GPT + one partition
+- [x] `image <VOL>` — VSS snapshot → dynamic VHDX, GPT + one partition
+- [x] `image diskN` — whole disk: verbatim GPT, per-partition VSS, raw gaps.
+      Same size as the source, so it attaches and boots directly
 - [x] `image --from` — differencing disk, unchanged blocks left unallocated
 - [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
 - [x] **used-clusters only** (`FSCTL_GET_VOLUME_BITMAP`) — free space is never

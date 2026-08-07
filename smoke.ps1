@@ -12,6 +12,7 @@ $work = Join-Path $env:TEMP 'bulkhead-smoke'
 $src  = Join-Path $work 'src.vhdx'
 $img  = Join-Path $work 'image.vhdx'
 $inc  = Join-Path $work 'image-inc.vhdx'
+$dsk  = Join-Path $work 'disk.vhdx'
 $exe  = Join-Path $PSScriptRoot 'target\debug\bulkhead.exe'
 
 # Build here rather than trusting whatever is in target\ -- `cargo test` leaves
@@ -29,7 +30,7 @@ function Invoke-Diskpart($lines, [switch]$Quiet) {
 }
 
 function Detach-All {
-    foreach ($v in @($src, $img, $inc)) {
+    foreach ($v in @($src, $img, $inc, $dsk)) {
         if (Test-Path $v) {
             Invoke-Diskpart @("select vdisk file=`"$v`"", "detach vdisk") -Quiet
         }
@@ -89,9 +90,37 @@ try {
     Write-Host "[*] image    $imgHash"
 
     if ($srcHash -ne $imgHash) { throw "FAIL  hashes differ" }
-    Write-Host "`nPASS  image round-trips" -ForegroundColor Green
+    Write-Host "`nPASS  volume image round-trips" -ForegroundColor Green
     Write-Host ("      full {0:N1} MB / incremental {1:N1} MB" -f `
         ((Get-Item $img).Length / 1MB), ((Get-Item $inc).Length / 1MB))
+
+    & $exe unmount $img
+    Start-Sleep -Seconds 1
+
+    # --- whole-disk image -------------------------------------------------
+    # The source VHDX is a real GPT disk: ESP-less, but with a data partition
+    # Windows has mounted and a second one it has not, so the raw path, the
+    # snapshot path and the inter-partition gaps all get exercised.
+    $srcDisk = (Get-Volume -FileSystemLabel BULKSRC | Get-Partition | Get-Disk).Number
+    Write-Host "`n[*] bulkhead image disk$srcDisk (whole disk)"
+    & $exe image "disk$srcDisk" $dsk
+    if ($LASTEXITCODE -ne 0) { throw "disk image failed" }
+
+    & $exe mount $dsk
+    if ($LASTEXITCODE -ne 0) { throw "disk image mount failed" }
+    Start-Sleep -Seconds 2
+
+    $dskLetter = (Get-Volume -FileSystemLabel BULKSRC |
+                  Where-Object DriveLetter -ne $srcLetter).DriveLetter
+    if (-not $dskLetter) { throw "disk image attached but no volume appeared" }
+    $dskHash = (Get-FileHash "${dskLetter}:\hello.txt").Hash
+    Write-Host "[*] disk image volume is ${dskLetter}:  $dskHash"
+    & $exe unmount $dsk
+
+    if ($dskHash -ne $srcHash) { throw "FAIL  disk image hashes differ" }
+    Write-Host "`nPASS  whole-disk image round-trips" -ForegroundColor Green
+    Write-Host ("      disk image {0:N1} MB (source disk 512 MB)" -f `
+        ((Get-Item $dsk).Length / 1MB))
 }
 finally {
     Detach-All
