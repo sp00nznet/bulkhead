@@ -112,6 +112,7 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
     let mut old = if skip_same { vec![0u8; CHUNK] } else { Vec::new() };
     let (mut done, mut written) = (0u64, 0u64);
     let (mut short, mut blank) = (0u64, 0u64);
+    let mut first_diff: Option<String> = None;
     let mut last_pct = u64::MAX;
     while done < total {
         let want = ((total - done) as usize).min(CHUNK);
@@ -145,6 +146,15 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
             false
         };
         if !same {
+            if skip_same && first_diff.is_none() {
+                let i = old[..n].iter().zip(&buf[..n]).position(|(a, b)| a != b).unwrap_or(0);
+                let hex = |s: &[u8]| s.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                let end = (i + 16).min(n);
+                first_diff = Some(format!(
+                    "at {} target={} source={}",
+                    dst_off + done + i as u64, hex(&old[i..end]), hex(&buf[i..end])
+                ));
+            }
             dst.seek(dst_off + done).ctx("target")?;
             dst.write_all(&buf[..n]).ctx("target")?;
             written += n as u64;
@@ -161,6 +171,7 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
     eprintln!();
     if skip_same {
         eprintln!("[*] {} changed", human(written));
+        if let Some(d) = &first_diff { eprintln!("[*] first difference {d}"); }
         if short > 0 || blank > 0 {
             eprintln!("[!] readback degraded: {short} short, {blank} blank where the source was not");
             eprintln!("[!] the parent chain is not being served -- this is a full copy, not a delta");
