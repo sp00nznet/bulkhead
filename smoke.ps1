@@ -1,5 +1,8 @@
 # Smoke test: build a throwaway 512 MB NTFS volume, image it, mount the image
-# back, and diff the files. Run elevated. Leaves nothing attached.
+# back, and compare a file hash across both. Run elevated.
+#
+# Detaches everything on the way out, including after a failure -- a leaked
+# attached VHDX makes the next run fail on cleanup instead of on the bug.
 #
 # ponytail: diskpart, not New-VHD -- New-VHD needs the Hyper-V module, diskpart
 # ships with every Windows.
@@ -12,62 +15,71 @@ $inc  = Join-Path $work 'image-inc.vhdx'
 $exe  = Join-Path $PSScriptRoot 'target\debug\bulkhead.exe'
 
 if (-not (Test-Path $exe)) { throw "build first: cargo build   (missing $exe)" }
-Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory $work | Out-Null
 
-function diskpart-run($lines) {
-    $f = Join-Path $work 'dp.txt'
-    Set-Content $f ($lines -join "`r`n") -Encoding ascii
+function Invoke-Diskpart($lines, [switch]$Quiet) {
+    $f = Join-Path $env:TEMP 'bulkhead-dp.txt'
+    Set-Content $f (($lines + 'exit') -join "`r`n") -Encoding ascii
     $out = diskpart /s $f
-    if ($LASTEXITCODE -ne 0) { throw "diskpart failed:`n$($out -join "`n")" }
+    if ($LASTEXITCODE -ne 0 -and -not $Quiet) { throw "diskpart failed:`n$($out -join "`n")" }
 }
 
-Write-Host "[*] creating source volume $src"
-diskpart-run @(
-    "create vdisk file=`"$src`" maximum=512 type=expandable",
-    "attach vdisk",
-    "convert gpt",
-    "create partition primary",
-    "format fs=ntfs quick label=BULKSRC",
-    "assign",
-    "exit"
-)
+function Detach-All {
+    foreach ($v in @($src, $img, $inc)) {
+        if (Test-Path $v) {
+            Invoke-Diskpart @("select vdisk file=`"$v`"", "detach vdisk") -Quiet
+        }
+    }
+}
 
-$srcLetter = (Get-Volume -FileSystemLabel BULKSRC).DriveLetter
-Write-Host "[*] source volume is ${srcLetter}:"
+Detach-All
+Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $work | Out-Null
 
-# something to look for on the other side
-1..50 | ForEach-Object { "payload line $_" } | Set-Content "${srcLetter}:\hello.txt"
-$srcHash = (Get-FileHash "${srcLetter}:\hello.txt").Hash
+try {
+    Write-Host "[*] creating source volume $src"
+    Invoke-Diskpart @(
+        "create vdisk file=`"$src`" maximum=512 type=expandable",
+        "attach vdisk",
+        "convert gpt",
+        "create partition primary",
+        "format fs=ntfs quick label=BULKSRC",
+        "assign"
+    )
 
-Write-Host "`n[*] bulkhead image"
-& $exe image "${srcLetter}:" $img
-if ($LASTEXITCODE -ne 0) { throw "image failed" }
+    $srcLetter = (Get-Volume -FileSystemLabel BULKSRC).DriveLetter
+    Write-Host "[*] source volume is ${srcLetter}:"
 
-Write-Host "`n[*] bulkhead image --from (incremental, nothing changed yet)"
-& $exe image "${srcLetter}:" $inc --from $img
-if ($LASTEXITCODE -ne 0) { throw "incremental failed" }
+    # something to look for on the other side
+    1..50 | ForEach-Object { "payload line $_" } | Set-Content "${srcLetter}:\hello.txt"
+    $srcHash = (Get-FileHash "${srcLetter}:\hello.txt").Hash
 
-Write-Host "`n[*] bulkhead mount"
-& $exe mount $img
-if ($LASTEXITCODE -ne 0) { throw "mount failed" }
-Start-Sleep -Seconds 2
+    Write-Host "`n[*] bulkhead image"
+    & $exe image "${srcLetter}:" $img
+    if ($LASTEXITCODE -ne 0) { throw "image failed" }
 
-$imgLetter = (Get-Volume -FileSystemLabel BULKSRC | Where-Object DriveLetter -ne $srcLetter).DriveLetter
-if (-not $imgLetter) { throw "image mounted but no volume appeared" }
-Write-Host "[*] image volume is ${imgLetter}:"
+    Write-Host "`n[*] bulkhead image --from (incremental, nothing changed yet)"
+    & $exe image "${srcLetter}:" $inc --from $img
+    if ($LASTEXITCODE -ne 0) { throw "incremental failed" }
 
-$imgHash = (Get-FileHash "${imgLetter}:\hello.txt").Hash
-Write-Host "`n[*] source   $srcHash"
-Write-Host "[*] image    $imgHash"
+    Write-Host "`n[*] bulkhead mount"
+    & $exe mount $img
+    if ($LASTEXITCODE -ne 0) { throw "mount failed" }
+    Start-Sleep -Seconds 2
 
-& $exe unmount $img
-diskpart-run @("select vdisk file=`"$src`"", "detach vdisk", "exit")
+    $imgLetter = (Get-Volume -FileSystemLabel BULKSRC |
+                  Where-Object DriveLetter -ne $srcLetter).DriveLetter
+    if (-not $imgLetter) { throw "image attached but no volume appeared" }
+    Write-Host "[*] image volume is ${imgLetter}:"
 
-if ($srcHash -eq $imgHash) {
+    $imgHash = (Get-FileHash "${imgLetter}:\hello.txt").Hash
+    Write-Host "`n[*] source   $srcHash"
+    Write-Host "[*] image    $imgHash"
+
+    if ($srcHash -ne $imgHash) { throw "FAIL  hashes differ" }
     Write-Host "`nPASS  image round-trips" -ForegroundColor Green
     Write-Host ("      full {0:N1} MB / incremental {1:N1} MB" -f `
         ((Get-Item $img).Length / 1MB), ((Get-Item $inc).Length / 1MB))
-} else {
-    throw "FAIL  hashes differ"
+}
+finally {
+    Detach-All
 }
