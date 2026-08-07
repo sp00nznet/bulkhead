@@ -34,6 +34,12 @@ const CHUNK: usize = 4 << 20;
 /// Reserved partition that Initialize-Disk creates alongside it.
 const DATA_GUID: &str = "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}";
 
+/// How much of a volume's tail may be unreadable before we call it truncation
+/// rather than a driver quirk. Observed gap is one cluster; 1 MiB is slack.
+/// ponytail: guessing at the boundary. It goes away with used-clusters-only
+/// imaging, which reads the filesystem's extent map instead of the partition.
+const TAIL_SLACK: u64 = MB;
+
 /// A raw block device or volume handle. All I/O is sector-aligned by
 /// construction: we start at an aligned offset and move in 4 MiB steps.
 struct Raw(HANDLE);
@@ -109,7 +115,19 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
     while done < total {
         let want = ((total - done) as usize).min(CHUNK);
         let n = src.read(&mut buf[..want])?;
-        if n == 0 { return Err(format!("source ended early at {done} of {total}").into()); }
+        if n == 0 {
+            // A volume reports its partition length but serves reads only to
+            // the filesystem's own end, which can be a few sectors short -- and
+            // it refuses a straddling read outright rather than returning a
+            // partial. Tolerate that at the tail only; anywhere else a zero
+            // read is a truncated image and must not pass silently.
+            if total - done > TAIL_SLACK {
+                return Err(format!("source ended early at {done} of {total}").into());
+            }
+            eprintln!("\n[*] last {} not served by the volume driver; left zeroed",
+                      human(total - done));
+            break;
+        }
 
         dst.seek(dst_off + done)?;
         let same = skip_same && dst.read(&mut old[..n])? == n && old[..n] == buf[..n];
