@@ -71,19 +71,19 @@ impl Raw {
                 self.0, IOCTL_DISK_GET_LENGTH_INFO, None, 0,
                 Some(&mut li as *mut _ as *mut c_void),
                 size_of::<GET_LENGTH_INFORMATION>() as u32, Some(&mut ret), None,
-            )?;
+            ).ctx("IOCTL_DISK_GET_LENGTH_INFO")?;
         }
         Ok(li.Length as u64)
     }
 
     fn seek(&self, off: u64) -> Res<()> {
-        unsafe { SetFilePointerEx(self.0, off as i64, None, FILE_BEGIN)?; }
+        unsafe { SetFilePointerEx(self.0, off as i64, None, FILE_BEGIN).ctx("seek")?; }
         Ok(())
     }
 
     fn read(&self, buf: &mut [u8]) -> Res<usize> {
         let mut n = 0u32;
-        unsafe { ReadFile(self.0, Some(buf), Some(&mut n), None)?; }
+        unsafe { ReadFile(self.0, Some(buf), Some(&mut n), None).ctx("read")?; }
         Ok(n as usize)
     }
 
@@ -91,7 +91,7 @@ impl Raw {
         let mut done = 0usize;
         while done < buf.len() {
             let mut n = 0u32;
-            unsafe { WriteFile(self.0, Some(&buf[done..]), Some(&mut n), None)?; }
+            unsafe { WriteFile(self.0, Some(&buf[done..]), Some(&mut n), None).ctx("write")?; }
             if n == 0 { return Err("short write to target".into()); }
             done += n as usize;
         }
@@ -114,7 +114,7 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
     let mut last_pct = u64::MAX;
     while done < total {
         let want = ((total - done) as usize).min(CHUNK);
-        let n = src.read(&mut buf[..want])?;
+        let n = src.read(&mut buf[..want]).ctx("source")?;
         if n == 0 {
             // A volume reports its partition length but serves reads only to
             // the filesystem's own end, which can be a few sectors short -- and
@@ -129,11 +129,11 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
             break;
         }
 
-        dst.seek(dst_off + done)?;
-        let same = skip_same && dst.read(&mut old[..n])? == n && old[..n] == buf[..n];
+        dst.seek(dst_off + done).ctx("target")?;
+        let same = skip_same && dst.read(&mut old[..n]).ctx("target readback")? == n && old[..n] == buf[..n];
         if !same {
-            dst.seek(dst_off + done)?;
-            dst.write_all(&buf[..n])?;
+            dst.seek(dst_off + done).ctx("target")?;
+            dst.write_all(&buf[..n]).ctx("target")?;
             written += n as u64;
         }
 
@@ -205,6 +205,16 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     if part_size < vol_size {
         return Err(format!("partition {} < volume {}", human(part_size), human(vol_size)).into());
     }
+
+    // A differencing disk inherits the parent's filesystem, not just its
+    // partition table, so attaching it makes Windows mount that volume -- and
+    // raw access to sectors owned by a mounted volume is denied. Offline is how
+    // you get the disk to yourself. Done for full images too: one code path,
+    // and nothing can auto-mount underneath us mid-copy.
+    ps(&format!(
+        "Set-Disk -Number {disk} -IsOffline $true
+         Set-Disk -Number {disk} -IsReadOnly $false"
+    ))?;
 
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
     copy(&src, &dst, offset, vol_size, parent.is_some())?;
