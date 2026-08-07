@@ -29,6 +29,11 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 const MB: u64 = 1 << 20;
 const CHUNK: usize = 4 << 20;
 
+/// GPT "Basic data partition". We tag the payload partition with it so we can
+/// find it again on an incremental without tripping over the Microsoft
+/// Reserved partition that Initialize-Disk creates alongside it.
+const DATA_GUID: &str = "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}";
+
 /// A raw block device or volume handle. All I/O is sector-aligned by
 /// construction: we start at an aligned offset and move in 4 MiB steps.
 struct Raw(HANDLE);
@@ -153,9 +158,10 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     let vol_size = src.len()?;
     eprintln!("[*] source {src_path} ({})", human(vol_size));
 
-    // Slack for the protective MBR + primary GPT (1 MiB alignment) and the
-    // backup GPT at the tail.
-    let disk_size = (vol_size + 8 * MB + MB - 1) / MB * MB;
+    // Slack for 1 MiB alignment, the backup GPT at the tail, and the Microsoft
+    // Reserved partition Initialize-Disk inserts (16 MiB under 16 GB, 32 MiB
+    // over). Over-reserving is free: the VHDX is dynamic.
+    let disk_size = (vol_size + 40 * MB + MB - 1) / MB * MB;
     let vhd = match parent {
         Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)? }
         None => Vhd::create(out, disk_size)?,
@@ -167,11 +173,11 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     // it would orphan the parent's data. Only a full image lays down a new one.
     // ponytail: Windows partitions its own disks correctly; see util::ps.
     let offset: u64 = if parent.is_some() {
-        ps(&format!("(Get-Partition -DiskNumber {disk} | Sort-Object Offset | Select-Object -First 1).Offset"))?
+        ps(&format!("(Get-Partition -DiskNumber {disk} | Where-Object GptType -eq '{DATA_GUID}').Offset"))?
     } else {
         ps(&format!(
-            r#"Initialize-Disk -Number {disk} -PartitionStyle GPT -Confirm:$false | Out-Null
-               (New-Partition -DiskNumber {disk} -UseMaximumSize -GptType '{{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}}').Offset"#
+            "Initialize-Disk -Number {disk} -PartitionStyle GPT -Confirm:$false | Out-Null
+             (New-Partition -DiskNumber {disk} -UseMaximumSize -GptType '{DATA_GUID}').Offset"
         ))?
     }.parse()?;
     let part_size = ps(&format!(
