@@ -48,32 +48,57 @@ fn need(p: &Path, what: &str) -> Res<()> {
     if p.exists() { Ok(()) } else { Err(format!("{what} not found at {}", p.display()).into()) }
 }
 
-pub fn build(out_iso: &str) -> Res<()> {
-    let kits = ps(
-        r"(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue).KitsRoot10",
+/// Where the ADK might be.
+///
+/// `KitsRoot10` is not one value: adksetup.exe is 32-bit and registers under
+/// WOW6432Node, while the Windows SDK registers in the 64-bit view -- so on a
+/// machine with both, the obvious lookup returns the SDK's path and the ADK
+/// looks missing. Collect every candidate and let the caller pick the one that
+/// actually holds the tools.
+fn adk_roots() -> Res<Vec<PathBuf>> {
+    let reg = ps(
+        "@('HKLM:\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots', \
+            'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows Kits\\Installed Roots') | \
+         ForEach-Object { (Get-ItemProperty $_ -ErrorAction SilentlyContinue).KitsRoot10 }",
     )?;
-    if kits.is_empty() {
-        return Err("Windows ADK not installed. Install the ADK *and* the separate \
-                    'Windows PE add-on' from https://aka.ms/adk -- WinPE has shipped \
-                    as its own download since ADK 1809."
-            .into());
+    let mut v: Vec<PathBuf> = reg
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(pf) = std::env::var(var) {
+            v.push(PathBuf::from(pf).join("Windows Kits").join("10"));
+        }
     }
+    v.dedup();
+    Ok(v)
+}
 
-    let adk = PathBuf::from(kits.trim()).join("Assessment and Deployment Kit");
+pub fn build(out_iso: &str) -> Res<()> {
+    let roots = adk_roots()?;
+    let adk = roots
+        .iter()
+        .map(|r| r.join("Assessment and Deployment Kit"))
+        .find(|a| a.join("Deployment Tools").join("DandISetEnv.bat").exists())
+        .ok_or_else(|| {
+            let tried: Vec<String> = roots.iter().map(|r| format!("\n      {}", r.display())).collect();
+            format!(
+                "Windows ADK not installed.\n    \
+                 Get it from https://aka.ms/adk and tick 'Deployment Tools'.\n    \
+                 Looked in:{}",
+                tried.concat()
+            )
+        })?;
+    eprintln!("[*] ADK at {}", adk.display());
     let dandi = adk.join("Deployment Tools").join("DandISetEnv.bat");
     let ocs = adk
         .join("Windows Preinstallation Environment")
         .join("amd64")
         .join("WinPE_OCs");
-    // KitsRoot10 is shared with the Windows SDK, so it can exist while neither
-    // of these does. Say which of the two downloads is missing.
-    if !dandi.exists() {
-        return Err(format!(
-            "Windows ADK not installed ({} is missing).\n    \
-             Get it from https://aka.ms/adk and tick 'Deployment Tools'.",
-            dandi.display()
-        ).into());
-    }
+    // The WinPE add-on is a separate download, so the ADK can be present
+    // without it. Say which of the two is missing.
     if !ocs.exists() {
         return Err(format!(
             "WinPE add-on not installed ({} is missing).\n    \

@@ -97,6 +97,7 @@ between the two images:
 | | before used-clusters-only | after |
 |---|---|---|
 | full image | 256 MB | **38 MB** |
+| whole-disk image | - | **36 MB** (512 MB disk) |
 | incremental | 255 MB | **35 MB** |
 | reported as changed | 18.2 MB | **2.6 MB** |
 
