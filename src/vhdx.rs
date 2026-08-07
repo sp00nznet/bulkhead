@@ -26,7 +26,8 @@ impl Drop for Vhd {
 
 impl Vhd {
     /// Create a new dynamically-expanding VHDX. `size` is the virtual size.
-    pub fn create(path: &str, size: u64) -> Res<Vhd> {
+    /// The handle is closed straight away -- attaching goes through `open`.
+    pub fn create(path: &str, size: u64) -> Res<()> {
         let w = wide(path);
         let mut p = CREATE_VIRTUAL_DISK_PARAMETERS::default();
         p.Version = CREATE_VIRTUAL_DISK_VERSION_2;
@@ -41,12 +42,13 @@ impl Vhd {
                 CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
             ).ok().ctx("CreateVirtualDisk")?;
         }
-        Ok(Vhd(h))
+        drop(Vhd(h));
+        Ok(())
     }
 
     /// Create a differencing VHDX whose backing store is `parent`. This is how
     /// incremental chains work -- Windows does the block tracking.
-    pub fn create_diff(path: &str, parent: &str) -> Res<Vhd> {
+    pub fn create_diff(path: &str, parent: &str) -> Res<()> {
         let w = wide(path);
         let pw = wide(parent);
         let mut p = CREATE_VIRTUAL_DISK_PARAMETERS::default();
@@ -60,20 +62,32 @@ impl Vhd {
                 CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
             ).ok().ctx("CreateVirtualDisk (differencing)")?;
         }
-        Ok(Vhd(h))
+        drop(Vhd(h));
+        Ok(())
     }
 
-    /// V2 parameters ignore the access mask and grant everything the caller is
-    /// entitled to, so read-only is enforced at attach time, not here.
-    pub fn open(path: &str) -> Res<Vhd> {
+    /// Open for attaching.
+    ///
+    /// V1 parameters on purpose. A create-handle carries VIRTUAL_DISK_ACCESS_NONE,
+    /// and attaching a differencing disk makes Windows open the whole parent
+    /// chain using that mask -- which is how you get ERROR_ACCESS_DENIED from
+    /// AttachVirtualDisk on a child that created just fine. V1 is what takes an
+    /// explicit mask, and `RWDepth` = 1 is exactly the differencing case: this
+    /// disk writable, its parents read-only.
+    pub fn open(path: &str, writable: bool) -> Res<Vhd> {
         let w = wide(path);
+        let access = if writable {
+            VIRTUAL_DISK_ACCESS_ALL
+        } else {
+            VIRTUAL_DISK_ACCESS_ATTACH_RO | VIRTUAL_DISK_ACCESS_READ | VIRTUAL_DISK_ACCESS_DETACH
+        };
         let mut p = OPEN_VIRTUAL_DISK_PARAMETERS::default();
-        p.Version = OPEN_VIRTUAL_DISK_VERSION_2;
-        p.Anonymous.Version2.GetInfoOnly = false.into();
+        p.Version = OPEN_VIRTUAL_DISK_VERSION_1;
+        p.Anonymous.Version1.RWDepth = if writable { 1 } else { 0 };
         let mut h = HANDLE::default();
         unsafe {
             OpenVirtualDisk(
-                &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE,
+                &vhdx_type(), PCWSTR(w.as_ptr()), access,
                 OPEN_VIRTUAL_DISK_FLAG_NONE, Some(&p), &mut h,
             ).ok().ctx("OpenVirtualDisk")?;
         }

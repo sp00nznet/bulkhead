@@ -180,10 +180,11 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     // Reserved partition Initialize-Disk inserts (16 MiB under 16 GB, 32 MiB
     // over). Over-reserving is free: the VHDX is dynamic.
     let disk_size = (vol_size + 40 * MB + MB - 1) / MB * MB;
-    let vhd = match parent {
-        Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)? }
+    match parent {
+        Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)?; }
         None => Vhd::create(out, disk_size)?,
-    };
+    }
+    let vhd = Vhd::open(out, true)?;
     vhd.attach(false, false, false)?;
     let disk = vhd.disk_number()?;
 
@@ -215,7 +216,7 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
 }
 
 fn cmd_mount(path: &str, rw: bool) -> Res<()> {
-    let vhd = Vhd::open(path)?;
+    let vhd = Vhd::open(path, rw)?;
     vhd.attach(!rw, true, true)?;
     eprintln!("[+] attached {} ({})", vhd.physical_path()?, if rw { "read-write" } else { "read-only" });
     eprintln!("    it appears in Explorer; detach with:  bulkhead unmount {path}");
@@ -223,7 +224,8 @@ fn cmd_mount(path: &str, rw: bool) -> Res<()> {
 }
 
 fn cmd_unmount(path: &str) -> Res<()> {
-    let vhd = Vhd::open(path)?;
+    // matches however it was attached
+    let vhd = Vhd::open(path, true).or_else(|_| Vhd::open(path, false))?;
     vhd.detach()?;
     eprintln!("[+] detached {path}");
     Ok(())
@@ -293,6 +295,24 @@ mod tests {
         assert_eq!(positional(&["mount", "--rw", "o.vhdx"]), ["mount", "o.vhdx"]);
         // trailing --from with no value must not panic
         assert_eq!(positional(&["mount", "o.vhdx", "--from"]), ["mount", "o.vhdx"]);
+    }
+
+    /// Differencing-disk creation needs no elevation, so it is testable here.
+    #[test]
+    fn differencing() {
+        let d = std::env::temp_dir().join("bulkhead-difftest");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let parent = d.join("p.vhdx").to_string_lossy().into_owned();
+        let child = d.join("c.vhdx").to_string_lossy().into_owned();
+
+        Vhd::create(&parent, 64 * MB).expect("create parent");
+        Vhd::create_diff(&child, &parent).expect("create differencing child");
+        // the attach path opens with an explicit mask; that much is testable
+        // unelevated, the attach itself is not
+        Vhd::open(&child, true).expect("open differencing child for attach");
+        assert!(std::fs::metadata(&child).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
