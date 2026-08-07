@@ -32,7 +32,11 @@ impl Vhd {
         let mut p = CREATE_VIRTUAL_DISK_PARAMETERS::default();
         p.Version = CREATE_VIRTUAL_DISK_VERSION_2;
         p.Anonymous.Version2.MaximumSize = size;
-        p.Anonymous.Version2.BlockSizeInBytes = 0; // provider default (32 MiB)
+        // 2 MiB blocks, not the 32 MiB default. A differencing child allocates
+        // whole blocks, and it inherits this from the parent, so the default
+        // turns 18 MB of scattered changes into a 256 MB incremental. Costs a
+        // bigger block allocation table on the full image.
+        p.Anonymous.Version2.BlockSizeInBytes = 2 << 20;
         p.Anonymous.Version2.SectorSizeInBytes = 512;
         p.Anonymous.Version2.PhysicalSectorSizeInBytes = 512;
         let mut h = HANDLE::default();

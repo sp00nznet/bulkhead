@@ -12,9 +12,9 @@ Windows** — VSS, VHDX differencing disks, `AttachVirtualDisk`, ATA/NVMe
 sanitize commands. The paid tools are charging for the integration. bulkhead is
 that integration, given away.
 
-> ⚠️ Pre-alpha. `image`, `mount`, `unmount` work; everything else is unwritten.
-> Nothing here writes to a source disk, but read the warnings before pointing it
-> at anything you care about.
+> ⚠️ Pre-alpha. `image`, `mount`, `unmount` work and round-trip on real
+> hardware; everything else is unwritten. Nothing here writes to a source disk,
+> but read the warnings before pointing it at anything you care about.
 
 ## Why VHDX
 
@@ -66,6 +66,10 @@ volumes nothing is writing to — an offline disk, or a drive you just plugged i
 
 ## Status
 
+`smoke.ps1` builds a throwaway 512 MB NTFS volume, images it, takes an
+incremental, mounts the image back and compares a file hash across both. Run it
+elevated.
+
 - [x] `image` — VSS snapshot → dynamic VHDX, GPT + one partition
 - [x] `image --from` — differencing disk, unchanged blocks left unallocated
 - [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
@@ -109,6 +113,17 @@ ceiling. Two worth knowing about:
 - **Incrementals read-compare** rather than tracking changed blocks. Correct,
   and it keeps the child VHDX small, but it reads the parent in full. A real CBT
   filter driver is a lot of driver for something that's I/O-bound either way.
+
+Two numbers worth knowing, because both were bugs once:
+
+- **Comparison granularity is 64 KiB.** At the 4 MiB read-chunk size, one
+  changed byte of NTFS metadata dirtied all 4 MiB, and a volume with nothing
+  but background churn reported 492 MB of 496 MB changed.
+- **VHDX block size is 2 MiB, not the 32 MiB default.** A differencing child
+  allocates whole blocks and inherits the size from its parent, so the default
+  turned 18 MB of scattered changes into a 256 MB incremental.
+
+Neither is measured against a real workload yet; both are `ponytail:` marked.
 
 ## License
 
