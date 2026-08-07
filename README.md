@@ -73,8 +73,8 @@ elevated.
 - [x] `image` — VSS snapshot → dynamic VHDX, GPT + one partition
 - [x] `image --from` — differencing disk, unchanged blocks left unallocated
 - [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
-- [ ] **used-clusters only** (`FSCTL_GET_VOLUME_BITMAP`) — the difference
-      between imaging 500 GB and imaging the 80 GB actually in use. Next.
+- [x] **used-clusters only** (`FSCTL_GET_VOLUME_BITMAP`) — free space is never
+      read and never written
 - [ ] `restore` — write a partition back to a live disk
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
@@ -125,18 +125,17 @@ Two granularity numbers, because both were bugs once:
 
 Neither is measured against a real workload yet; both are `ponytail:` marked.
 
-### Known limitation: incremental size on small volumes
+### Known limitation: incremental size
 
-An incremental is no smaller than `2 MiB × (number of distinct 2 MiB regions
-touched)`. NTFS churn — `$LogFile`, `$MFT`, the volume bitmap — is scattered
-rather than contiguous, so on the 496 MB smoke-test volume 18 MB of real
-change lands in ~127 separate regions and produces a 255 MB child. That is
-VHDX's floor, not a bug, and it is worst on exactly the case the smoke test
-uses: a small volume whose metadata is smeared across all of it.
+An incremental is no smaller than `2 MiB x (number of distinct 2 MiB regions
+touched)`, because VHDX materialises a whole block on any write into it. NTFS
+churn -- `$LogFile`, `$MFT`, the volume bitmap -- is scattered rather than
+contiguous, so a small number of changed bytes still touches a lot of regions.
+Reading the allocation bitmap removes the free-space half of this; what remains
+is metadata churn inside the used region.
 
-The fix is the next milestone rather than a smaller block size: imaging only
-allocated clusters (`FSCTL_GET_VOLUME_BITMAP`) skips free space entirely and
-shrinks both full images and incrementals.
+A third granularity, alongside the two above: **free space is skipped in whole
+4 MiB chunks**, so a run of free clusters shorter than that is still copied.
 
 ## License
 
