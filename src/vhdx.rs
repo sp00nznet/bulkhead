@@ -5,7 +5,7 @@ use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::Vhd::*;
 
-use crate::util::{wide, Res};
+use crate::util::{wide, Ctx, Res};
 
 const VENDOR_MSFT: GUID = GUID::from_u128(0xec984aec_a0f9_47e9_901f_71415a66345b);
 
@@ -39,7 +39,7 @@ impl Vhd {
             CreateVirtualDisk(
                 &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE, None,
                 CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
-            ).ok()?;
+            ).ok().ctx("CreateVirtualDisk")?;
         }
         Ok(Vhd(h))
     }
@@ -58,7 +58,7 @@ impl Vhd {
             CreateVirtualDisk(
                 &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE, None,
                 CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
-            ).ok()?;
+            ).ok().ctx("CreateVirtualDisk (differencing)")?;
         }
         Ok(Vhd(h))
     }
@@ -75,7 +75,7 @@ impl Vhd {
             OpenVirtualDisk(
                 &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE,
                 OPEN_VIRTUAL_DISK_FLAG_NONE, Some(&p), &mut h,
-            ).ok()?;
+            ).ok().ctx("OpenVirtualDisk")?;
         }
         Ok(Vhd(h))
     }
@@ -89,12 +89,12 @@ impl Vhd {
         if permanent { flags |= ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME; }
         let mut p = ATTACH_VIRTUAL_DISK_PARAMETERS::default();
         p.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
-        unsafe { AttachVirtualDisk(self.0, None, flags, 0, Some(&p), None).ok()?; }
+        unsafe { AttachVirtualDisk(self.0, None, flags, 0, Some(&p), None).ok().ctx("AttachVirtualDisk")?; }
         Ok(())
     }
 
     pub fn detach(&self) -> Res<()> {
-        unsafe { DetachVirtualDisk(self.0, DETACH_VIRTUAL_DISK_FLAG_NONE, 0).ok()?; }
+        unsafe { DetachVirtualDisk(self.0, DETACH_VIRTUAL_DISK_FLAG_NONE, 0).ok().ctx("DetachVirtualDisk")?; }
         Ok(())
     }
 
@@ -102,7 +102,7 @@ impl Vhd {
     pub fn physical_path(&self) -> Res<String> {
         let mut buf = [0u16; 260];
         let mut len = (buf.len() * 2) as u32;
-        unsafe { GetVirtualDiskPhysicalPath(self.0, &mut len, PWSTR(buf.as_mut_ptr())).ok()?; }
+        unsafe { GetVirtualDiskPhysicalPath(self.0, &mut len, PWSTR(buf.as_mut_ptr())).ok().ctx("GetVirtualDiskPhysicalPath")?; }
         let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         Ok(String::from_utf16_lossy(&buf[..n]))
     }

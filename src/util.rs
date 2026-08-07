@@ -4,6 +4,18 @@ use std::process::Command;
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// Name the call that failed. Win32 errors are just codes -- "Access is denied"
+/// with no idea which of six VirtDisk calls said it is not a diagnosis.
+pub trait Ctx<T> {
+    fn ctx(self, what: &str) -> Res<T>;
+}
+
+impl<T, E: std::fmt::Display> Ctx<T> for Result<T, E> {
+    fn ctx(self, what: &str) -> Res<T> {
+        self.map_err(|e| format!("{what}: {e}").into())
+    }
+}
+
 pub fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }

@@ -21,7 +21,7 @@ use windows::Win32::System::Ioctl::{GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGT
 use windows::Win32::System::IO::DeviceIoControl;
 
 use snap::Snapshot;
-use util::{human, ps, wide, Res};
+use util::{human, ps, wide, Ctx, Res};
 use vhdx::Vhd;
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -172,7 +172,7 @@ fn cmd_image(volume: &str, out: &str, use_vss: bool, parent: Option<&str>) -> Re
 }
 
 fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
-    let src = Raw::open(src_path, false)?;
+    let src = Raw::open(src_path, false).ctx("open source volume")?;
     let vol_size = src.len()?;
     eprintln!("[*] source {src_path} ({})", human(vol_size));
 
@@ -205,7 +205,7 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
         return Err(format!("partition {} < volume {}", human(part_size), human(vol_size)).into());
     }
 
-    let dst = Raw::open(&vhd.physical_path()?, true)?;
+    let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
     copy(&src, &dst, offset, vol_size, parent.is_some())?;
     drop(dst);
 
