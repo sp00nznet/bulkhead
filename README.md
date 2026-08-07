@@ -114,16 +114,29 @@ ceiling. Two worth knowing about:
   and it keeps the child VHDX small, but it reads the parent in full. A real CBT
   filter driver is a lot of driver for something that's I/O-bound either way.
 
-Two numbers worth knowing, because both were bugs once:
+Two granularity numbers, because both were bugs once:
 
 - **Comparison granularity is 64 KiB.** At the 4 MiB read-chunk size, one
   changed byte of NTFS metadata dirtied all 4 MiB, and a volume with nothing
   but background churn reported 492 MB of 496 MB changed.
-- **VHDX block size is 2 MiB, not the 32 MiB default.** A differencing child
-  allocates whole blocks and inherits the size from its parent, so the default
-  turned 18 MB of scattered changes into a 256 MB incremental.
+- **VHDX block size is 2 MiB, not the 32 MiB default.** VHDX materialises a
+  whole block on any write into it, and a differencing child inherits the size
+  from its parent. The default turned 18 MB of scattered changes into 256 MB.
 
 Neither is measured against a real workload yet; both are `ponytail:` marked.
+
+### Known limitation: incremental size on small volumes
+
+An incremental is no smaller than `2 MiB × (number of distinct 2 MiB regions
+touched)`. NTFS churn — `$LogFile`, `$MFT`, the volume bitmap — is scattered
+rather than contiguous, so on the 496 MB smoke-test volume 18 MB of real
+change lands in ~127 separate regions and produces a 255 MB child. That is
+VHDX's floor, not a bug, and it is worst on exactly the case the smoke test
+uses: a small volume whose metadata is smeared across all of it.
+
+The fix is the next milestone rather than a smaller block size: imaging only
+allocated clusters (`FSCTL_GET_VOLUME_BITMAP`) skips free space entirely and
+shrinks both full images and incrementals.
 
 ## License
 
