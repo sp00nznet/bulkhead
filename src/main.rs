@@ -3,6 +3,7 @@
 //! Images a live volume through a VSS snapshot into a VHDX. VHDX is the point:
 //! Windows already mounts one as a drive, already does differencing chains for
 //! incrementals, and already boots one. The paid tools charge for those.
+mod bitmap;
 mod snap;
 mod util;
 mod vhdx;
@@ -20,6 +21,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Ioctl::{GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO};
 use windows::Win32::System::IO::DeviceIoControl;
 
+use bitmap::Bitmap;
 use snap::Snapshot;
 use util::{human, ps, wide, Ctx, Res};
 use vhdx::Vhd;
@@ -41,8 +43,8 @@ const DATA_GUID: &str = "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}";
 
 /// How much of a volume's tail may be unreadable before we call it truncation
 /// rather than a driver quirk. Observed gap is one cluster; 1 MiB is slack.
-/// ponytail: guessing at the boundary. It goes away with used-clusters-only
-/// imaging, which reads the filesystem's extent map instead of the partition.
+/// ponytail: guessing at the boundary. The precise answer is the filesystem's
+/// own recorded length, which means parsing a BPB per filesystem.
 const TAIL_SLACK: u64 = MB;
 
 /// A raw block device or volume handle. All I/O is sector-aligned by
@@ -139,14 +141,34 @@ fn diff_runs(old: &[u8], new: &[u8], grain: usize) -> Vec<(usize, usize)> {
 /// ponytail: read-compare costs a full read of the parent. The upgrade is
 /// changed-block tracking (a filter driver), which is a lot of driver for a
 /// feature that is I/O-bound either way.
-fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<()> {
+fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool,
+        alloc: Option<&Bitmap>) -> Res<()> {
     let mut buf = vec![0u8; CHUNK];
     let mut old = if skip_same { vec![0u8; CHUNK] } else { Vec::new() };
-    let (mut done, mut written) = (0u64, 0u64);
+    let (mut done, mut written, mut skipped) = (0u64, 0u64, 0u64);
     let (mut short, mut blank) = (0u64, 0u64);
     let mut last_pct = u64::MAX;
     while done < total {
+        let pct = done * 100 / total;
+        if pct != last_pct {
+            eprint!("\r  {pct:3}%  {} / {}", human(done), human(total));
+            let _ = std::io::stderr().flush();
+            last_pct = pct;
+        }
         let want = ((total - done) as usize).min(CHUNK);
+
+        // Free space holds nothing worth copying. Skipping means not even
+        // reading it, which is where the time goes on a mostly-empty disk.
+        // ponytail: whole chunks only, so free space in runs shorter than
+        // 4 MiB is still copied. Drop to GRAIN if that shows up as a problem.
+        if alloc.is_some_and(|b| !b.any_allocated(done, done + want as u64)) {
+            done += want as u64;
+            skipped += want as u64;
+            continue;
+        }
+
+        // Explicit, because a skipped chunk leaves the file pointer behind.
+        src.seek(done).ctx("source")?;
         let n = src.read(&mut buf[..want]).ctx("source")?;
         if n == 0 {
             // A volume reports its partition length but serves reads only to
@@ -185,14 +207,12 @@ fn copy(src: &Raw, dst: &Raw, dst_off: u64, total: u64, skip_same: bool) -> Res<
         }
 
         done += n as u64;
-        let pct = done * 100 / total;
-        if pct != last_pct {
-            eprint!("\r  {pct:3}%  {} / {}", human(done), human(total));
-            let _ = std::io::stderr().flush();
-            last_pct = pct;
-        }
     }
-    eprintln!();
+    eprintln!("\r  100%  {} / {}      ", human(done), human(total));
+    if let Some(b) = alloc {
+        eprintln!("[*] {} free space skipped ({} of {} clusters in use)",
+                  human(skipped), b.allocated, b.clusters);
+    }
     if skip_same {
         eprintln!("[*] {} changed", human(written));
         if short > 0 || blank > 0 {
@@ -228,6 +248,15 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     let src = Raw::open(src_path, false).ctx("open source volume")?;
     let vol_size = src.len()?;
     eprintln!("[*] source {src_path} ({})", human(vol_size));
+
+    // Ask the filesystem which clusters actually hold data. None means it did
+    // not offer a bitmap, and we image every sector instead.
+    let alloc = bitmap::read(src.0, vol_size)?;
+    match &alloc {
+        Some(b) => eprintln!("[*] {} in use of {} ({}-byte clusters)",
+                             human(b.allocated * b.cluster), human(vol_size), b.cluster),
+        None => eprintln!("[*] no allocation bitmap; imaging every sector"),
+    }
 
     // Slack for 1 MiB alignment, the backup GPT at the tail, and the Microsoft
     // Reserved partition Initialize-Disk inserts (16 MiB under 16 GB, 32 MiB
@@ -271,7 +300,7 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
 
     eprintln!("[*] disk {disk} partition at offset {offset} ({})", human(part_size));
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
-    copy(&src, &dst, offset, vol_size, parent.is_some())?;
+    copy(&src, &dst, offset, vol_size, parent.is_some(), alloc.as_ref())?;
     drop(dst);
 
     vhd.detach()?;

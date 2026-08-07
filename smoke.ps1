@@ -58,6 +58,10 @@ try {
     1..50 | ForEach-Object { "payload line $_" } | Set-Content "${srcLetter}:\hello.txt"
     $srcHash = (Get-FileHash "${srcLetter}:\hello.txt").Hash
 
+    # 64 MB of allocated clusters on a 496 MB volume, so "free space skipped"
+    # has something to be measured against
+    fsutil file createnew "${srcLetter}:\bulk.dat" (64MB) | Out-Null
+
     Write-Host "`n[*] bulkhead image"
     & $exe image "${srcLetter}:" $img
     if ($LASTEXITCODE -ne 0) { throw "image failed" }
