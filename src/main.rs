@@ -191,8 +191,7 @@ impl Region<'_> {
         while done < total {
             let pct = done * 100 / total;
             if pct != last_pct {
-                eprint!("
-  {pct:3}%  {} / {}", human(done), human(total));
+                eprint!("\r  {pct:3}%  {} / {}", human(done), human(total));
                 let _ = std::io::stderr().flush();
                 last_pct = pct;
             }
@@ -249,8 +248,7 @@ impl Region<'_> {
 
             done += n as u64;
         }
-        eprintln!("
-  100%  {} / {}      ", human(done), human(total));
+        eprintln!("\r  100%  {} / {}      ", human(done), human(total));
         if let Some(b) = self.alloc {
             eprintln!("    {} free space skipped ({} of {} clusters in use)",
                       human(skipped), b.allocated, b.clusters);
@@ -266,10 +264,10 @@ impl Region<'_> {
 }
 
 
-/// `disk0`, `0`, or `\.\PhysicalDrive0` -- anything else is a volume.
+/// `disk0`, `0`, or `\\.\PhysicalDrive0` -- anything else is a volume.
 fn disk_arg(s: &str) -> Option<u32> {
     let t = s.to_ascii_lowercase();
-    let d = t.strip_prefix(r"\.\physicaldrive")
+    let d = t.strip_prefix(r"\\.\physicaldrive")
         .or_else(|| t.strip_prefix("disk"))
         .unwrap_or(&t);
     if d.is_empty() { return None; }
@@ -309,7 +307,7 @@ fn partitions(disk: u32) -> Res<Vec<Part>> {
 /// backup GPT lands on the same LBA -- which is what makes the image directly
 /// bootable instead of merely restorable.
 fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<()> {
-    let phys_path = format!(r"\.\PhysicalDrive{disk}");
+    let phys_path = format!(r"\\.\PhysicalDrive{disk}");
     let phys = Raw::open(&phys_path, false).ctx("open source disk")?;
     let disk_size = phys.len()?;
     let sector = phys.sector_size()?;
@@ -626,7 +624,10 @@ mod tests {
     fn disk_vs_volume() {
         assert_eq!(disk_arg("disk0"), Some(0));
         assert_eq!(disk_arg("Disk12"), Some(12));
-        assert_eq!(disk_arg(r"\.\PhysicalDrive3"), Some(3));
+        assert_eq!(disk_arg(r"\\.\PhysicalDrive3"), Some(3));
+        // a mangled prefix must not still match -- this test previously
+        // encoded the same escaping bug as the code it was checking
+        assert_eq!(disk_arg(r"\.\PhysicalDrive3"), None);
         assert_eq!(disk_arg("3"), Some(3));
         // volumes must not be mistaken for disks
         assert_eq!(disk_arg("C:"), None);
