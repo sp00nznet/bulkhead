@@ -33,11 +33,21 @@ echo     bulkhead mount E:\\backup.vhdx
 echo.
 ";
 
+/// Run a batch snippet.
+///
+/// Via a .bat file rather than `cmd /c "..."` on purpose: Rust escapes quotes
+/// in arguments the way the C runtime parses them, and cmd.exe does not use
+/// that convention, so a quoted path arrives with literal backslash-quotes and
+/// cmd reports the whole thing as an unrecognised command. A file has no
+/// quoting layer to get wrong.
 fn sh(what: &str, script: &str) -> Res<()> {
     eprintln!("[*] {what}");
+    let bat = std::env::temp_dir().join(format!("bulkhead-{}.bat", std::process::id()));
+    std::fs::write(&bat, format!("@echo off\r\n{}\r\n", script.replace('\n', "\r\n")))?;
     // Inherited stdio on purpose -- DISM runs for minutes and its progress
     // meter is the only sign it is alive.
-    let st = Command::new("cmd").args(["/c", script]).status()?;
+    let st = Command::new("cmd").arg("/c").arg(&bat).status()?;
+    let _ = std::fs::remove_file(&bat);
     if !st.success() {
         return Err(format!("{what} failed ({st})").into());
     }
@@ -77,6 +87,16 @@ fn adk_roots() -> Res<Vec<PathBuf>> {
 }
 
 pub fn build(out_iso: &str) -> Res<()> {
+    // Checked up front because the first thing that needs it is a DISM
+    // preflight whose failure is neither fatal nor obviously about privilege.
+    let admin = ps(
+        "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())\
+         .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+    )?;
+    if !admin.trim().eq_ignore_ascii_case("true") {
+        return Err("building media needs an elevated prompt (DISM services the image)".into());
+    }
+
     let roots = adk_roots()?;
     let adk = roots
         .iter()
