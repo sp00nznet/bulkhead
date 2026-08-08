@@ -15,8 +15,13 @@ const SECTOR: u64 = 512;
 /// Anything smaller is noise, not a partition worth restoring.
 const MIN_SECTORS: u64 = 2048;
 const CHUNK: usize = 4 << 20;
-/// Longest magic, so one straddling a read boundary is still found.
-const OVERLAP: usize = 16;
+/// How far past a candidate start a detector's magic can sit. btrfs keeps its
+/// superblock 64 KiB in, the furthest of the lot. Reading this much beyond the
+/// chunk means a candidate near the end can still be checked.
+///
+/// A multiple of the sector size, like every length here: reads from a raw
+/// disk handle must be whole sectors.
+const LOOKAHEAD: usize = 128 << 10;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {
@@ -30,6 +35,9 @@ pub struct Candidate {
     /// you cannot size a LUKS or LVM container from its header alone.
     pub report_only: bool,
     pub note: &'static str,
+    /// Higher wins when two candidates claim the same ground. Corroborating
+    /// structures a ghost cannot fake raise it -- see the NTFS detector.
+    pub confidence: u8,
 }
 
 impl Candidate {
@@ -42,6 +50,7 @@ impl Candidate {
             gpt_type,
             report_only: false,
             note: "",
+            confidence: 1,
         }
     }
     fn with_label(mut self, l: String) -> Candidate {
@@ -134,7 +143,21 @@ fn ntfs(disk: &Raw, start: u64) -> Option<Candidate> {
     }
 
     // NTFS records its size excluding the backup boot sector that follows it.
-    Some(Candidate::new(start, total + 1, "ntfs", BASIC))
+    let mut c = Candidate::new(start, total + 1, "ntfs", BASIC);
+
+    // The backup boot sector is a copy of the first, parked on the volume's
+    // last sector. It is the strongest evidence a volume really occupies the
+    // ground it claims: a boot sector left behind by an earlier layout is
+    // still readable, but the tail it points at now belongs to something else.
+    //
+    // Missing it is not disqualifying -- a genuinely truncated volume is still
+    // worth recovering -- so it raises confidence rather than acting as a veto.
+    if let Some(bak) = at(disk, start + total * bps, 512) {
+        if &bak[3..11] == b"NTFS    " && bak[510..512] == [0x55, 0xAA] {
+            c.confidence += 1;
+        }
+    }
+    Some(c)
 }
 
 fn exfat(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -288,19 +311,10 @@ const SIGNATURES: &[(&[u8], u64, Detector)] = &[
     (b"LABELONE", 0, lvm),
 ];
 
-fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return Vec::new();
-    }
-    (0..=hay.len() - needle.len())
-        .filter(|&i| &hay[i..i + needle.len()] == needle)
-        .collect()
-}
-
 pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
     let mut found: Vec<Candidate> = Vec::new();
     let mut seen_starts: Vec<u64> = Vec::new();
-    let mut buf = vec![0u8; CHUNK + OVERLAP];
+    let mut buf = vec![0u8; CHUNK + LOOKAHEAD];
     let mut pos = 0u64;
     let mut last_pct = u64::MAX;
 
@@ -312,24 +326,31 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
             break;
         }
 
-        for (magic, moff, detect) in SIGNATURES {
-            for idx in find_all(&buf[..n], magic) {
-                let abs = pos + idx as u64;
-                let Some(start) = abs.checked_sub(*moff) else { continue };
-                // A real filesystem starts on a sector boundary. This alone
-                // kills almost every false positive from file contents.
-                if start % SECTOR != 0 || seen_starts.contains(&start) {
-                    continue;
-                }
-                if let Some(c) = detect(disk, start) {
-                    if c.sectors >= MIN_SECTORS && c.end_lba() * SECTOR < disk_size {
-                        seen_starts.push(c.start_lba * SECTOR);
-                        eprintln!("\r  found {} at {} ({})      ",
-                                  c.fstype, human(c.start_lba * SECTOR), human(c.bytes()));
-                        found.push(c);
+        // Walk sector boundaries, not bytes. A filesystem always begins on
+        // one, so a magic anywhere else is file contents that happen to look
+        // like a header -- and checking one position in 512 is the difference
+        // between this finishing and not.
+        let mut off = 0usize;
+        while off < n.min(CHUNK) {
+            let start = pos + off as u64;
+            if !seen_starts.contains(&start) {
+                for (magic, moff, detect) in SIGNATURES {
+                    let a = off + *moff as usize;
+                    if a + magic.len() > n || &buf[a..a + magic.len()] != *magic {
+                        continue;
+                    }
+                    if let Some(c) = detect(disk, start) {
+                        if c.sectors >= MIN_SECTORS && c.end_lba() * SECTOR < disk_size {
+                            seen_starts.push(c.start_lba * SECTOR);
+                            eprintln!("\r  found {} at {} ({})      ",
+                                      c.fstype, human(c.start_lba * SECTOR), human(c.bytes()));
+                            found.push(c);
+                            break;
+                        }
                     }
                 }
             }
+            off += SECTOR as usize;
         }
 
         pos += CHUNK as u64;
@@ -372,12 +393,12 @@ pub fn dedup_contained(cands: Vec<Candidate>) -> Vec<Candidate> {
 /// Pick a non-overlapping set, largest first where two claim the same ground.
 ///
 /// Overlaps are real: a disk repartitioned once carries the ghost of the old
-/// layout, and both sets of headers survive. Preferring the larger candidate
-/// favours the filesystem that currently owns the space over a stale one it
-/// was carved out of.
+/// layout, and both sets of headers survive. Best-corroborated wins, then
+/// largest -- size alone cannot separate a moved volume from the boot sector
+/// it left behind, since both report the same length.
 pub fn resolve(cands: &[Candidate]) -> (Vec<Candidate>, Vec<Candidate>) {
     let mut by_size: Vec<&Candidate> = cands.iter().filter(|c| !c.report_only).collect();
-    by_size.sort_by_key(|c| u64::MAX - c.sectors);
+    by_size.sort_by_key(|c| (u8::MAX - c.confidence, u64::MAX - c.sectors));
 
     let (mut keep, mut drop): (Vec<Candidate>, Vec<Candidate>) = (Vec::new(), Vec::new());
     for c in by_size {
@@ -408,6 +429,7 @@ mod tests {
             gpt_type: BASIC,
             report_only: false,
             note: "",
+            confidence: 1,
         }
     }
 
@@ -450,6 +472,19 @@ mod tests {
         assert_eq!(keep.len(), 1);
         assert_eq!(keep[0].fstype, "ntfs");
         assert!(dropped.is_empty(), "report-only is excluded, not rejected");
+    }
+
+    #[test]
+    fn corroborated_candidate_beats_a_same_sized_ghost() {
+        // exactly the smoke-test disk: a volume moved forward, leaving its old
+        // boot sector behind claiming the same size
+        let ghost = cand(32_768, 1_015_808, "ntfs");
+        let mut live = cand(237_568, 1_015_808, "ntfs");
+        live.confidence = 2; // its backup boot sector is still there
+        let (keep, dropped) = resolve(&[ghost, live]);
+        assert_eq!(keep.len(), 1);
+        assert_eq!(keep[0].start_lba, 237_568, "the ghost must not win on tie-break order");
+        assert_eq!(dropped[0].start_lba, 32_768);
     }
 
     #[test]

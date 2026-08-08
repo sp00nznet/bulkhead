@@ -230,12 +230,17 @@ Two things a naive signature scan gets wrong, both handled:
   looks like an identical partition starting partway into the real one. Same
   type, same size, contained in an earlier candidate is always a copy.
 - **Ghosts.** A disk that was repartitioned still carries the old layout's boot
-  sectors, reporting plausible sizes for filesystems that no longer exist
-  there. For NTFS the boot sector is followed to the `$MFT` and checked: a
-  ghost's boot sector survives, its `$MFT` does not.
+  sectors, reporting plausible sizes for filesystems that have moved or gone.
+  Size cannot separate them — a moved volume and the boot sector it left behind
+  report exactly the same length. So NTFS candidates are corroborated twice:
+  the boot sector is followed to the `$MFT` (required), and to the backup boot
+  sector on the volume's last sector (raises confidence). A ghost's header
+  survives; the tail it points at now belongs to whatever occupies that ground.
 
-Where two candidates still claim the same ground, the larger wins and the other
-is reported as skipped. `--rebuild` saves the existing table to a file first,
+Where two candidates still claim the same ground, the best-corroborated wins,
+then the larger, and the other is reported as skipped. A truncated volume whose
+tail is gone is still found — it just loses a tie-break rather than being
+rejected outright. `--rebuild` saves the existing table to a file first,
 and only writes partition entries — filesystem contents are never touched.
 
 ## Design notes
