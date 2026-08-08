@@ -678,10 +678,22 @@ fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
     // ponytail: New-Partition takes an explicit offset and size, so Windows
     // writes the GPT, the protective MBR and the GUIDs. Writing a table
     // builder here would be a lot of code to do what the OS already does.
-    // It only writes table entries; the filesystems underneath are untouched.
+    //
+    // Every cmdlet here edits only the partition table. Clear-Disk is
+    // deliberately NOT used: Microsoft documents it as erasing all data on the
+    // disk, which in a recovery path destroys the exact thing being recovered.
+    // Remove-Partition drops entries; Initialize-Disk only lays down a table on
+    // a disk that has none.
+    //
+    // The MSR that Initialize-Disk inserts has to go too -- it claims 16 MB
+    // right after the header, which would collide with any recovered partition
+    // starting near the front of the disk.
     ps(&format!(
-        "Clear-Disk -Number {disk_no} -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
-         Initialize-Disk -Number {disk_no} -PartitionStyle GPT -Confirm:$false | Out-Null"
+        "if ((Get-Disk -Number {disk_no}).PartitionStyle -eq 'RAW') {{
+             Initialize-Disk -Number {disk_no} -PartitionStyle GPT -Confirm:$false | Out-Null
+         }}
+         Get-Partition -DiskNumber {disk_no} -ErrorAction SilentlyContinue |
+             Remove-Partition -Confirm:$false -ErrorAction SilentlyContinue"
     ))?;
     for c in &keep {
         ps(&format!(

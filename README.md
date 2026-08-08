@@ -238,7 +238,11 @@ Two things a naive signature scan gets wrong, both handled:
   survives; the tail it points at now belongs to whatever occupies that ground.
 
 Where two candidates still claim the same ground, the best-corroborated wins,
-then the larger, and the other is reported as skipped. A truncated volume whose
+then the larger, and the other is reported as skipped.
+
+Rebuild only ever edits the partition table. `Clear-Disk` is deliberately not
+used anywhere in this path — Microsoft documents it as erasing all data on the
+disk, which in a recovery tool destroys the thing being recovered. A truncated volume whose
 tail is gone is still found — it just loses a tie-break rather than being
 rejected outright. `--rebuild` saves the existing table to a file first,
 and only writes partition entries — filesystem contents are never touched.
