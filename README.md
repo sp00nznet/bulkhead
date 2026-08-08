@@ -85,6 +85,13 @@ VSS does not exist in WinPE either, so imaging from the media is always
 `--no-snapshot`. That costs nothing: nothing in WinPE is writing to the disk
 you are imaging.
 
+Takes a few minutes, almost all of it DISM, and produces a ~534 MB ISO. For a
+USB stick instead of an ISO, the workspace is left in place:
+
+```powershell
+MakeWinPEMedia /UFD "$env:TEMPulkhead-winpe" F:
+```
+
 ## Status
 
 `smoke.ps1` builds a throwaway 512 MB NTFS volume, images it, takes an
