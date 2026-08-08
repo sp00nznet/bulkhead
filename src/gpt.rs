@@ -113,6 +113,97 @@ pub fn relocate(primary: &[u8], disk_size: u64, sector: u64) -> Option<Fixup> {
     })
 }
 
+const PART_CRC: usize = 88;
+
+/// Byte offsets inside a 128-byte partition entry.
+const E_TYPE: usize = 0;
+const E_START: usize = 32;
+const E_END: usize = 40;
+const E_NAME: usize = 56;
+
+pub fn is_gpt(header: &[u8]) -> bool {
+    header.len() >= MIN_HEADER && &header[..8] == SIG
+}
+
+pub fn header_size(h: &[u8]) -> usize { u32_at(h, HEADER_SIZE) as usize }
+pub fn entry_size(h: &[u8]) -> usize { u32_at(h, ENTRY_SIZE) as usize }
+pub fn entry_count(h: &[u8]) -> usize { u32_at(h, NUM_ENTRIES) as usize }
+pub fn entry_array_lba(h: &[u8]) -> u64 { u64_at(h, ENTRIES_LBA) }
+pub fn first_usable(h: &[u8]) -> u64 { u64_at(h, FIRST_USABLE) }
+pub fn alternate_lba(h: &[u8]) -> u64 { u64_at(h, ALT_LBA) }
+
+/// Turn a copy of the primary header into the backup one. Caller reseals.
+pub fn make_backup(h: &mut [u8], last_lba: u64, entries_lba: u64) {
+    put(h, MY_LBA, last_lba);
+    put(h, ALT_LBA, 1);
+    put(h, ENTRIES_LBA, entries_lba);
+}
+pub fn last_usable(h: &[u8]) -> u64 { u64_at(h, LAST_USABLE) }
+
+#[derive(Debug, PartialEq)]
+pub struct Entry {
+    /// 1-based, matching how every disk tool numbers partitions.
+    pub number: usize,
+    pub start_lba: u64,
+    /// Inclusive, as GPT stores it.
+    pub end_lba: u64,
+    pub name: String,
+}
+
+impl Entry {
+    pub fn sectors(&self) -> u64 { self.end_lba - self.start_lba + 1 }
+}
+
+/// Occupied entries only. An all-zero type GUID means the slot is free.
+pub fn entries(header: &[u8], array: &[u8]) -> Vec<Entry> {
+    let (sz, n) = (entry_size(header), entry_count(header));
+    if sz < E_NAME {
+        return Vec::new();
+    }
+    (0..n)
+        .filter_map(|i| {
+            let e = array.get(i * sz..(i + 1) * sz)?;
+            if e[E_TYPE..E_TYPE + 16].iter().all(|&b| b == 0) {
+                return None;
+            }
+            let utf16: Vec<u16> = e[E_NAME..sz]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&c| c != 0)
+                .collect();
+            Some(Entry {
+                number: i + 1,
+                start_lba: u64_at(e, E_START),
+                end_lba: u64_at(e, E_END),
+                name: String::from_utf16_lossy(&utf16),
+            })
+        })
+        .collect()
+}
+
+/// Point entry `number` (1-based) at a new extent, keeping its length.
+pub fn set_start(header: &[u8], array: &mut [u8], number: usize, start_lba: u64) -> Option<()> {
+    let sz = entry_size(header);
+    if number == 0 || number > entry_count(header) {
+        return None;
+    }
+    let e = array.get_mut((number - 1) * sz..number * sz)?;
+    let len = u64_at(e, E_END) - u64_at(e, E_START);
+    put(e, E_START, start_lba);
+    put(e, E_END, start_lba + len);
+    Some(())
+}
+
+/// Recompute the entry-array CRC the header carries, then the header's own.
+/// Both must be right or firmware falls back to the other copy -- or rejects
+/// the disk outright.
+pub fn reseal(header: &mut [u8], array: &[u8]) {
+    let n = entry_count(header) * entry_size(header);
+    let crc = crc32(&array[..n.min(array.len())]);
+    header[PART_CRC..PART_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+    seal(header);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +258,70 @@ mod tests {
             probe[HEADER_CRC..HEADER_CRC + 4].fill(0);
             assert_eq!(stored, crc32(&probe));
         }
+    }
+
+    /// 128 entries of 128 bytes, with `n` of them occupied back to back.
+    fn array(extents: &[(u64, u64)]) -> Vec<u8> {
+        let mut a = vec![0u8; 128 * 128];
+        for (i, &(start, end)) in extents.iter().enumerate() {
+            let e = &mut a[i * 128..(i + 1) * 128];
+            e[..16].copy_from_slice(&[0xEB; 16]); // any non-zero type GUID
+            put(e, E_START, start);
+            put(e, E_END, end);
+            let name: Vec<u16> = format!("p{}", i + 1).encode_utf16().collect();
+            for (j, c) in name.iter().enumerate() {
+                e[E_NAME + j * 2..E_NAME + j * 2 + 2].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn reads_occupied_entries_only() {
+        let h = header(100 * 1024 * 1024 / 512);
+        let a = array(&[(2048, 4095), (4096, 20479)]);
+        let got = entries(&h, &a);
+        assert_eq!(got.len(), 2, "empty slots must not be reported");
+        assert_eq!(got[0], Entry { number: 1, start_lba: 2048, end_lba: 4095, name: "p1".into() });
+        assert_eq!(got[1].number, 2);
+        assert_eq!(got[1].sectors(), 16384);
+    }
+
+    #[test]
+    fn moving_an_entry_keeps_its_length() {
+        let h = header(100 * 1024 * 1024 / 512);
+        let mut a = array(&[(2048, 4095), (4096, 20479)]);
+        let before = entries(&h, &a)[1].sectors();
+
+        set_start(&h, &mut a, 2, 40960).expect("entry 2 exists");
+        let after = &entries(&h, &a)[1];
+        assert_eq!(after.start_lba, 40960);
+        assert_eq!(after.sectors(), before, "a move must not resize");
+        assert_eq!(after.end_lba, 40960 + before - 1);
+        // the untouched neighbour stays put
+        assert_eq!(entries(&h, &a)[0].start_lba, 2048);
+
+        assert!(set_start(&h, &mut a, 0, 100).is_none(), "entries are 1-based");
+        assert!(set_start(&h, &mut a, 129, 100).is_none(), "past the end of the array");
+    }
+
+    #[test]
+    fn reseal_updates_both_checksums() {
+        let mut h = header(100 * 1024 * 1024 / 512)[..92].to_vec();
+        let mut a = array(&[(2048, 4095)]);
+        reseal(&mut h, &a);
+        let array_crc = u32_at(&h, PART_CRC) as u32;
+
+        // change the table; the header must no longer vouch for it
+        set_start(&h.clone(), &mut a, 1, 8192).unwrap();
+        assert_ne!(crc32(&a), array_crc, "entry CRC should track the array");
+
+        reseal(&mut h, &a);
+        assert_eq!(u32_at(&h, PART_CRC) as u32, crc32(&a));
+        let stored = u32_at(&h, HEADER_CRC) as u32;
+        let mut probe = h.clone();
+        probe[HEADER_CRC..HEADER_CRC + 4].fill(0);
+        assert_eq!(stored, crc32(&probe), "header CRC must cover the new entry CRC");
     }
 
     #[test]

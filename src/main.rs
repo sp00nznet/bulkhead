@@ -606,6 +606,220 @@ fn grow_gpt(dst: &Raw, dst_size: u64, src_size: u64, sector: u64) -> Res<()> {
     Ok(())
 }
 
+/// `1048576`, `100MB`, `2GB`, `512K`. Plain numbers are bytes.
+fn parse_size(s: &str) -> Option<u64> {
+    let t = s.trim().to_ascii_uppercase().replace('B', "");
+    let (num, mul) = match t.chars().last()? {
+        'K' => (&t[..t.len() - 1], 1u64 << 10),
+        'M' => (&t[..t.len() - 1], 1 << 20),
+        'G' => (&t[..t.len() - 1], 1 << 30),
+        'T' => (&t[..t.len() - 1], 1u64 << 40),
+        _ => (t.as_str(), 1),
+    };
+    num.trim().parse::<u64>().ok()?.checked_mul(mul)
+}
+
+/// The whole GPT of a live disk, read once and written back as a unit.
+struct Table {
+    header: Vec<u8>,
+    array: Vec<u8>,
+    sector: u64,
+}
+
+impl Table {
+    fn read(disk: &Raw) -> Res<Table> {
+        let sector = disk.sector_size()? as u64;
+        let mut lba1 = vec![0u8; sector as usize];
+        disk.seek(sector)?;
+        disk.read(&mut lba1)?;
+        if !gpt::is_gpt(&lba1) {
+            return Err("not a GPT disk (MBR disks are not supported yet)".into());
+        }
+        let header = lba1[..gpt::header_size(&lba1)].to_vec();
+        let bytes = gpt::entry_count(&header) * gpt::entry_size(&header);
+        let mut array = vec![0u8; bytes.div_ceil(sector as usize) * sector as usize];
+        disk.seek(gpt::entry_array_lba(&header) * sector)?;
+        disk.read(&mut array)?;
+        Ok(Table { header, array, sector })
+    }
+
+    /// Write the primary table, its backup, and both headers. Done only after
+    /// any data movement has succeeded, so a crash mid-copy leaves a table
+    /// that still describes where the data actually is.
+    fn write(&mut self, disk: &Raw) -> Res<()> {
+        gpt::reseal(&mut self.header, &self.array);
+
+        let mut sec = vec![0u8; self.sector as usize];
+        sec[..self.header.len()].copy_from_slice(&self.header);
+        disk.seek(self.sector)?;
+        disk.write_all(&sec)?;
+        disk.seek(gpt::entry_array_lba(&self.header) * self.sector)?;
+        disk.write_all(&self.array)?;
+
+        // The backup header describes itself, so it needs its own CRC.
+        let last = gpt::alternate_lba(&self.header);
+        let entries_lba = last - (self.array.len() as u64 / self.sector);
+        let mut backup = self.header.clone();
+        gpt::make_backup(&mut backup, last, entries_lba);
+        gpt::reseal(&mut backup, &self.array);
+        disk.seek(entries_lba * self.sector)?;
+        disk.write_all(&self.array)?;
+        sec.fill(0);
+        sec[..backup.len()].copy_from_slice(&backup);
+        disk.seek(last * self.sector)?;
+        disk.write_all(&sec)?;
+        Ok(())
+    }
+}
+
+fn cmd_part_list(disk_no: u32) -> Res<()> {
+    let disk = Raw::open(&format!(r"\\.\PhysicalDrive{disk_no}"), false).ctx("open disk")?;
+    let size = disk.len()?;
+    let t = Table::read(&disk)?;
+    let parts = gpt::entries(&t.header, &t.array);
+
+    eprintln!("disk {disk_no}: {} ({}-byte sectors)", human(size), t.sector);
+    let mut pos = gpt::first_usable(&t.header);
+    for p in &parts {
+        if p.start_lba > pos {
+            eprintln!("     {:>12}  {:>10}  (free)",
+                      human(pos * t.sector), human((p.start_lba - pos) * t.sector));
+        }
+        eprintln!("  {}  {:>12}  {:>10}  {}",
+                  p.number, human(p.start_lba * t.sector), human(p.sectors() * t.sector), p.name);
+        pos = p.end_lba + 1;
+    }
+    let end = gpt::last_usable(&t.header);
+    if end > pos {
+        eprintln!("     {:>12}  {:>10}  (free)",
+                  human(pos * t.sector), human((end - pos + 1) * t.sector));
+    }
+    Ok(())
+}
+
+/// Move a partition's data and repoint its table entry.
+///
+/// Windows cannot do this at any price, and it is what makes "extend into the
+/// free space to the left" possible: slide the partition down, then extend it
+/// with the native tools.
+fn cmd_part_move(disk_no: u32, number: usize, to: u64, yes: bool) -> Res<()> {
+    let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
+    if sys.trim() == disk_no.to_string() {
+        return Err(format!(
+            "disk {disk_no} holds the running C:. Move partitions from the recovery media."
+        ).into());
+    }
+
+    let disk = Raw::open(&format!(r"\\.\PhysicalDrive{disk_no}"), true).ctx("open disk")?;
+    let mut t = Table::read(&disk)?;
+    let parts = gpt::entries(&t.header, &t.array);
+    let me = parts.iter().find(|p| p.number == number)
+        .ok_or_else(|| format!("disk {disk_no} has no partition {number}"))?;
+
+    if to % t.sector != 0 {
+        return Err(format!("offset must be a multiple of the {}-byte sector", t.sector).into());
+    }
+    let new_start = to / t.sector;
+    let len = me.sectors();
+    let new_end = new_start + len - 1;
+
+    if new_start < gpt::first_usable(&t.header) || new_end > gpt::last_usable(&t.header) {
+        return Err(format!(
+            "{} .. {} is outside the usable area ({} .. {})",
+            human(new_start * t.sector), human((new_end + 1) * t.sector),
+            human(gpt::first_usable(&t.header) * t.sector),
+            human((gpt::last_usable(&t.header) + 1) * t.sector)
+        ).into());
+    }
+    for other in parts.iter().filter(|p| p.number != number) {
+        if new_start <= other.end_lba && other.start_lba <= new_end {
+            return Err(format!("that would overlap partition {}", other.number).into());
+        }
+    }
+    if new_start == me.start_lba {
+        eprintln!("[*] partition {number} is already there");
+        return Ok(());
+    }
+
+    eprintln!("\n[!] Moving disk {disk_no} partition {number} ({}) from {} to {}",
+              human(len * t.sector), human(me.start_lba * t.sector), human(to));
+    eprintln!("[!] Interrupting this loses the partition. There is no journal.");
+    if !yes {
+        eprint!("    Type YES to continue: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != "YES" {
+            return Err("cancelled".into());
+        }
+    }
+
+    ps(&format!(
+        "Set-Disk -Number {disk_no} -IsOffline $true
+         Set-Disk -Number {disk_no} -IsReadOnly $false"
+    ))?;
+
+    move_bytes(&disk, me.start_lba * t.sector, to, len * t.sector)?;
+
+    // Only now is the table allowed to point at the new location.
+    gpt::set_start(&t.header.clone(), &mut t.array, number, new_start)
+        .ok_or("could not update the partition entry")?;
+    t.write(&disk)?;
+
+    drop(disk);
+    ps(&format!("Set-Disk -Number {disk_no} -IsOffline $false"))?;
+    eprintln!("[+] partition {number} now starts at {}", human(to));
+    Ok(())
+}
+
+/// Copy `len` bytes within one device, correct even when the ranges overlap.
+///
+/// Sliding a partition forward by less than its own length overlaps itself; a
+/// forward copy would then read bytes it had already overwritten. Going
+/// backwards from the end is the only safe direction in that case.
+/// Does moving `len` bytes from `from` to `to` land on top of itself?
+fn overlaps_forward(from: u64, to: u64, len: u64) -> bool {
+    to > from && to < from + len
+}
+
+/// Which slice to copy on the step that has already done `done` bytes.
+/// Backwards takes the *last* not-yet-copied chunk, so the read always lands
+/// on bytes the write has not reached.
+fn step(len: u64, done: u64, chunk: u64, backwards: bool) -> (u64, usize) {
+    let n = (len - done).min(chunk);
+    let off = if backwards { len - done - n } else { done };
+    (off, n as usize)
+}
+
+fn move_bytes(disk: &Raw, from: u64, to: u64, len: u64) -> Res<()> {
+    let mut buf = vec![0u8; CHUNK];
+    let backwards = overlaps_forward(from, to, len);
+    let mut done = 0u64;
+    let mut last_pct = u64::MAX;
+
+    eprintln!("[*] moving {} {}", human(len), if backwards { "(backwards)" } else { "" });
+    while done < len {
+        let (off, n) = step(len, done, CHUNK as u64, backwards);
+        disk.seek(from + off)?;
+        let got = disk.read(&mut buf[..n])?;
+        if got != n {
+            return Err(format!("short read at {}", from + off).into());
+        }
+        disk.seek(to + off)?;
+        disk.write_all(&buf[..n])?;
+        done += n as u64;
+
+        let pct = done * 100 / len;
+        if pct != last_pct {
+            eprint!("\r  {pct:3}%  {} / {}", human(done), human(len));
+            let _ = std::io::stderr().flush();
+            last_pct = pct;
+        }
+    }
+    eprintln!("\r  100%  {} / {}      ", human(len), human(len));
+    Ok(())
+}
+
 fn cmd_mount(path: &str, rw: bool) -> Res<()> {
     let vhd = Vhd::open(path, rw)?;
     vhd.attach(!rw, true, true)?;
@@ -639,19 +853,24 @@ bulkhead -- block-level backup and recovery for Windows
       ERASE a disk and write the image back over it. Asks first.
       A bigger target keeps its extra space: the GPT is extended to fit.
 
+  bulkhead part list <diskN>
+  bulkhead part move <diskN> <N> --to <OFFSET>   e.g. --to 1MB
+      Slide a partition to a new offset. Windows cannot do this at all;
+      it is also how you extend into free space that sits to the LEFT.
+
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
 
 Needs an elevated prompt (raw volume access).";
 
-/// Positional args, with `--flags` and `--from VALUE` removed.
+/// Positional args, with `--flags` and their values removed.
 fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut v = Vec::new();
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" => { it.next(); }
+            "--from" | "--to" => { it.next(); }
             _ if x.starts_with("--") => {}
             _ => v.push(x),
         }
@@ -672,6 +891,14 @@ fn main() {
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
+        ["part", "list", d] => disk_arg(d)
+            .ok_or_else(|| format!("{d:?} is not a disk").into())
+            .and_then(cmd_part_list),
+        ["part", "move", d, n] => match (disk_arg(d), n.parse(), opt("--to").and_then(parse_size)) {
+            (Some(d), Ok(n), Some(to)) => cmd_part_move(d, n, to, flag("--yes")),
+            (_, _, None) => Err("part move needs --to <OFFSET>".into()),
+            _ => Err(format!("bad disk or partition number: {d:?} {n:?}").into()),
+        },
         _ => { eprintln!("{USAGE}"); std::process::exit(2); }
     };
     if let Err(e) = r {
@@ -687,7 +914,7 @@ mod tests {
     #[test]
     fn args() {
         assert_eq!(positional(&["image", "C:", "o.vhdx"]), ["image", "C:", "o.vhdx"]);
-        // --from swallows its value; bare flags vanish
+        // options swallow their value; bare flags vanish
         assert_eq!(
             positional(&["image", "C:", "o.vhdx", "--from", "p.vhdx", "--no-snapshot"]),
             ["image", "C:", "o.vhdx"]
@@ -755,6 +982,62 @@ mod tests {
         assert_eq!(disk_arg("C:\\"), None);
         assert_eq!(disk_arg("disk"), None);
         assert_eq!(disk_arg("diskX"), None);
+    }
+
+    #[test]
+    fn offsets() {
+        assert_eq!(parse_size("1048576"), Some(1 << 20));
+        assert_eq!(parse_size("100MB"), Some(100 << 20));
+        assert_eq!(parse_size("2G"), Some(2 << 30));
+        assert_eq!(parse_size(" 512K "), Some(512 << 10));
+        assert_eq!(parse_size("abc"), None);
+        assert_eq!(parse_size(""), None);
+        // must not silently wrap to a tiny offset
+        assert_eq!(parse_size("99999999999999T"), None);
+    }
+
+    /// Replay a move against a byte array with the same arithmetic the device
+    /// path uses. An overlapping forward move that copies front-to-back reads
+    /// bytes it has already clobbered, so this is the check that matters.
+    fn simulate(from: usize, to: usize, len: usize, chunk: u64) -> (Vec<u8>, Vec<u8>) {
+        let original: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let mut disk = original.clone();
+        let backwards = overlaps_forward(from as u64, to as u64, len as u64);
+        let mut done = 0u64;
+        while done < len as u64 {
+            let (off, n) = step(len as u64, done, chunk, backwards);
+            let (o, n) = (off as usize, n);
+            let piece = disk[from + o..from + o + n].to_vec();
+            disk[to + o..to + o + n].copy_from_slice(&piece);
+            done += n as u64;
+        }
+        (disk[to..to + len].to_vec(), original[from..from + len].to_vec())
+    }
+
+    #[test]
+    fn overlapping_moves_do_not_eat_themselves() {
+        // slide forward by less than the length: the dangerous case
+        assert!(overlaps_forward(1000, 1200, 500));
+        let (moved, want) = simulate(1000, 1200, 500, 128);
+        assert_eq!(moved, want, "forward overlap must copy back to front");
+
+        // slide backward: overlapping, but front-to-back is safe
+        assert!(!overlaps_forward(1000, 800, 500));
+        let (moved, want) = simulate(1000, 800, 500, 128);
+        assert_eq!(moved, want);
+
+        // no overlap at all, either direction
+        assert!(!overlaps_forward(1000, 2000, 500));
+        let (moved, want) = simulate(1000, 2000, 500, 128);
+        assert_eq!(moved, want);
+
+        // a length that is not a whole number of chunks
+        let (moved, want) = simulate(1000, 1150, 333, 128);
+        assert_eq!(moved, want);
+
+        // one chunk covers the whole move
+        let (moved, want) = simulate(1000, 1100, 200, 4096);
+        assert_eq!(moved, want);
     }
 
     #[test]

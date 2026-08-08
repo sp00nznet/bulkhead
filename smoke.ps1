@@ -162,6 +162,48 @@ try {
     }
 
     Write-Host "`nPASS  restore to a larger disk, GPT relocated" -ForegroundColor Green
+
+    # --- partition move ----------------------------------------------------
+    # The restored disk has a 16 MB partition 1 then the data partition, with
+    # ~500 MB free at the end. Slide the data partition right, into space that
+    # is not adjacent to it -- overlapping its own start, which is the case a
+    # naive front-to-back copy corrupts.
+    Write-Host "`n[*] bulkhead part list disk$tgtDisk"
+    & $exe part list "disk$tgtDisk"
+
+    $dataPart = Get-Partition -DiskNumber $tgtDisk | Sort-Object Size -Descending | Select-Object -First 1
+    $oldOffset = $dataPart.Offset
+    $newOffset = $oldOffset + 100MB
+    Write-Host "`n[*] bulkhead part move disk$tgtDisk $($dataPart.PartitionNumber) --to $newOffset"
+
+    & $exe part move "disk$tgtDisk" $dataPart.PartitionNumber --to $newOffset --yes
+    if ($LASTEXITCODE -ne 0) { throw "part move failed" }
+    Start-Sleep -Seconds 3
+
+    $moved = Get-Partition -DiskNumber $tgtDisk |
+             Where-Object { $_.PartitionNumber -eq $dataPart.PartitionNumber }
+    if ($moved.Offset -ne $newOffset) {
+        throw "FAIL  partition is at $($moved.Offset), expected $newOffset"
+    }
+    if ($moved.Size -ne $dataPart.Size) {
+        throw "FAIL  move changed the size: $($dataPart.Size) -> $($moved.Size)"
+    }
+
+    # The filesystem has to survive being relocated wholesale, not just the
+    # table entry. If the data did not follow, this volume will not mount.
+    if (-not $moved.DriveLetter) {
+        $moved | Add-PartitionAccessPath -AssignDriveLetter
+        Start-Sleep -Seconds 2
+        $moved = Get-Partition -DiskNumber $tgtDisk -PartitionNumber $dataPart.PartitionNumber
+    }
+    $mHash = (Get-FileHash "$($moved.DriveLetter):\hello.txt").Hash
+    Write-Host "[*] moved volume is $($moved.DriveLetter):  $mHash"
+    if ($mHash -ne $srcHash) { throw "FAIL  data did not survive the move" }
+
+    Write-Host "`n[*] bulkhead part list disk$tgtDisk (after)"
+    & $exe part list "disk$tgtDisk"
+
+    Write-Host "`nPASS  partition moved, filesystem intact" -ForegroundColor Green
 }
 finally {
     Detach-All

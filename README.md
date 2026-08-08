@@ -49,6 +49,8 @@ bulkhead image <VOL|diskN> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
 bulkhead mount <IMAGE.vhdx> [--rw]
 bulkhead unmount <IMAGE.vhdx>
 bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
+bulkhead part list <diskN>
+bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
 bulkhead media <OUT.iso>
 ```
 
@@ -132,9 +134,8 @@ stranded behind a partition table describing the old disk.
 The five things people currently pay for. Each one builds on the last:
 
 1. **Imaging + recovery media** — *in progress.* The Reflect Free replacement.
-2. **Partition manager** — resize/move, MBR↔GPT without data loss, migrate an
-   OS to a smaller SSD. Inherits the GPT work from
-   [partrevive](https://github.com/sp00nznet/partrevive).
+2. **Partition manager** — *in progress.* `part move` works. See below for
+   what is deliberately not reimplemented.
 3. **Data recovery GUI** — TestDisk and PhotoRec are free and capable; the UX
    is the product. Mostly integration, not new science.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
@@ -146,6 +147,34 @@ The five things people currently pay for. Each one builds on the last:
 
 Linux and macOS are a stretch goal. Windows first, because that's where the
 gap is.
+
+## Partitioning
+
+```powershell
+bulkhead part list disk1
+bulkhead part move disk1 2 --to 1MB
+```
+
+Most of a partition manager is already free, so bulkhead only implements the
+part that is not:
+
+| Operation | Who does it |
+|---|---|
+| Shrink / extend a volume | Windows: `Resize-Partition`, Disk Management |
+| MBR→GPT on the system disk | Windows: `mbr2gpt.exe`, since 1703 |
+| **Move a partition** | **Nobody, at any price. This.** |
+
+Moving is also the missing half of the operation people actually hit: Windows
+will not extend a partition into free space that sits to its *left*. Slide the
+partition down with `part move`, then extend it with the native tools.
+
+A move is not journalled. If it is interrupted, the partition is gone — the
+table is only rewritten after the data has landed, so a crash leaves the old
+table pointing at data that is still where it says, but a crash *during* an
+overlapping move loses the overlap. Image the disk first.
+
+`part move` refuses the disk holding the running system; do that from the
+recovery media.
 
 ## Design notes
 
