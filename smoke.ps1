@@ -236,7 +236,26 @@ try {
         Start-Sleep -Seconds 2
         $rec = Get-Partition -DiskNumber $tgtDisk -PartitionNumber $rec.PartitionNumber
     }
-    $recHash = (Get-FileHash "$($rec.DriveLetter):\hello.txt").Hash
+
+    # A freshly created partition entry can take a few seconds to surface as a
+    # mounted volume, so poll rather than assume. If it never arrives, dump
+    # what Windows actually thinks is there instead of failing blind.
+    $recPath = "$($rec.DriveLetter):\hello.txt"
+    for ($i = 0; $i -lt 10 -and -not (Test-Path $recPath); $i++) { Start-Sleep -Seconds 1 }
+    if (-not (Test-Path $recPath)) {
+        Write-Host "`n--- partitions on disk$tgtDisk ---"
+        Get-Partition -DiskNumber $tgtDisk |
+            Format-Table PartitionNumber, DriveLetter, Offset, Size, Type -AutoSize | Out-String | Write-Host
+        Write-Host "--- volumes ---"
+        Get-Volume | Where-Object DriveLetter |
+            Format-Table DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining -AutoSize |
+            Out-String | Write-Host
+        Write-Host "--- root of $($rec.DriveLetter): ---"
+        Get-ChildItem "$($rec.DriveLetter):\" -Force -ErrorAction SilentlyContinue |
+            Format-Table Name, Length -AutoSize | Out-String | Write-Host
+        throw "FAIL  $recPath never appeared"
+    }
+    $recHash = (Get-FileHash $recPath).Hash
     Write-Host "[*] recovered volume is $($rec.DriveLetter):  $recHash"
     if ($recHash -ne $srcHash) { throw "FAIL  recovered data does not match" }
 

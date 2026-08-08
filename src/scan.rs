@@ -362,7 +362,9 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
             last_pct = pct;
         }
     }
-    eprintln!("\r  100%  {}          ", human(disk_size));
+    // Same shape as the progress line it overwrites, or the tail of the longer
+    // one is left behind.
+    eprintln!("\r  100%  {} / {}      ", human(disk_size), human(disk_size));
 
     found.sort_by_key(|c| (c.start_lba, u64::MAX - c.sectors));
     Ok(dedup_contained(found))
