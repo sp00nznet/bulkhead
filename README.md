@@ -12,9 +12,10 @@ Windows** — VSS, VHDX differencing disks, `AttachVirtualDisk`, ATA/NVMe
 sanitize commands. The paid tools are charging for the integration. bulkhead is
 that integration, given away.
 
-> ⚠️ Pre-alpha. `image`, `mount`, `unmount` work and round-trip on real
-> hardware; everything else is unwritten. Nothing here writes to a source disk,
-> but read the warnings before pointing it at anything you care about.
+> ⚠️ Pre-alpha, but every command works and is verified on real hardware.
+> Nothing has been tried against a real *system* disk yet, and the recovery ISO
+> has been built but never booted. `restore` and `part move` write to disks and
+> are not undoable — read what they print before saying yes.
 
 ## Why VHDX
 
@@ -72,7 +73,7 @@ volumes nothing is writing to — an offline disk, or a drive you just plugged i
 ### Recovery media
 
 ```powershell
-bulkhead media D:ulkhead-recovery.iso
+bulkhead media D:\bulkhead-recovery.iso
 ```
 
 Builds bootable WinPE with bulkhead in it. Needs the **Windows ADK** and its
@@ -92,7 +93,7 @@ Takes a few minutes, almost all of it DISM, and produces a ~534 MB ISO. For a
 USB stick instead of an ISO, the workspace is left in place:
 
 ```powershell
-MakeWinPEMedia /UFD "$env:TEMPulkhead-winpe" F:
+MakeWinPEMedia /UFD "$env:TEMP\bulkhead-winpe" F:
 ```
 
 ## Status
