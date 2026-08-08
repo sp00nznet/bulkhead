@@ -107,13 +107,13 @@ between the two images:
 | | before used-clusters-only | after |
 |---|---|---|
 | full image | 256 MB | **38 MB** |
+| incremental | 255 MB | **35 MB** |
+| reported as changed | 18.2 MB | **2.6 MB** |
 | whole-disk image | - | **36 MB** (512 MB disk) |
 
 `restore` puts that 512 MB image onto a 1 GB disk and relocates the GPT, so all
 512 MB of the extra space comes back as usable free space rather than being
 stranded behind a partition table describing the old disk.
-| incremental | 255 MB | **35 MB** |
-| reported as changed | 18.2 MB | **2.6 MB** |
 
 - [x] `image <VOL>` — VSS snapshot → dynamic VHDX, GPT + one partition
 - [x] `image diskN` — whole disk: verbatim GPT, per-partition VSS, raw gaps.
@@ -127,15 +127,20 @@ stranded behind a partition table describing the old disk.
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
-- [ ] GUI
+- [ ] GUI — everything is CLI-only, which is a real adoption ceiling
+- [ ] MBR disks in `part` (GPT only today)
+- [ ] tested against a real system disk; BitLocker images as ciphertext
+- [ ] the ISO has been built but never booted
 
 ## Roadmap
 
 The five things people currently pay for. Each one builds on the last:
 
-1. **Imaging + recovery media** — *in progress.* The Reflect Free replacement.
-2. **Partition manager** — *in progress.* `part move` works. See below for
-   what is deliberately not reimplemented.
+1. **Imaging + recovery media** — **done.** The Reflect Free replacement.
+   Outstanding: `verify`, scheduling/retention/chain merge.
+2. **Partition manager** — **done for GPT.** `part move` is the operation
+   nobody gives away; see below for what is deliberately left to Windows.
+   Outstanding: MBR disks are rejected outright.
 3. **Data recovery GUI** — TestDisk and PhotoRec are free and capable; the UX
    is the product. Mostly integration, not new science.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
