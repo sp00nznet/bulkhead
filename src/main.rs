@@ -560,7 +560,7 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
     }.run()?;
 
     if dst_size > src_size {
-        grow_gpt(&dst, dst_size, sector)?;
+        grow_gpt(&dst, dst_size, src_size, sector)?;
     }
 
     drop(dst);
@@ -572,7 +572,7 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
 /// After restoring a smaller image onto a bigger disk, the copied GPT still
 /// describes the old disk and its backup table sits stranded mid-disk. Move it
 /// to the end so the extra space is addressable and firmware accepts the table.
-fn grow_gpt(dst: &Raw, dst_size: u64, sector: u64) -> Res<()> {
+fn grow_gpt(dst: &Raw, dst_size: u64, src_size: u64, sector: u64) -> Res<()> {
     let mut lba1 = vec![0u8; sector as usize];
     dst.seek(sector)?;
     if dst.read(&mut lba1)? != sector as usize {
@@ -601,8 +601,8 @@ fn grow_gpt(dst: &Raw, dst_size: u64, sector: u64) -> Res<()> {
     dst.seek(f.last_lba * sector)?;
     dst.write_all(&sec)?;
 
-    eprintln!("[*] GPT extended to {} ({} spare)",
-              human(dst_size), human(dst_size - (f.last_lba + 1) * sector + sector));
+    eprintln!("[*] GPT extended to {}; {} now unpartitioned and usable",
+              human(dst_size), human(dst_size - src_size));
     Ok(())
 }
 

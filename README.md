@@ -106,6 +106,10 @@ between the two images:
 |---|---|---|
 | full image | 256 MB | **38 MB** |
 | whole-disk image | - | **36 MB** (512 MB disk) |
+
+`restore` puts that 512 MB image onto a 1 GB disk and relocates the GPT, so all
+512 MB of the extra space comes back as usable free space rather than being
+stranded behind a partition table describing the old disk.
 | incremental | 255 MB | **35 MB** |
 | reported as changed | 18.2 MB | **2.6 MB** |
 
