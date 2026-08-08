@@ -13,6 +13,7 @@ $src  = Join-Path $work 'src.vhdx'
 $img  = Join-Path $work 'image.vhdx'
 $inc  = Join-Path $work 'image-inc.vhdx'
 $dsk  = Join-Path $work 'disk.vhdx'
+$tgt  = Join-Path $work 'restore-target.vhdx'
 $exe  = Join-Path $PSScriptRoot 'target\debug\bulkhead.exe'
 
 # Build here rather than trusting whatever is in target\ -- `cargo test` leaves
@@ -30,7 +31,7 @@ function Invoke-Diskpart($lines, [switch]$Quiet) {
 }
 
 function Detach-All {
-    foreach ($v in @($src, $img, $inc, $dsk)) {
+    foreach ($v in @($src, $img, $inc, $dsk, $tgt)) {
         if (Test-Path $v) {
             Invoke-Diskpart @("select vdisk file=`"$v`"", "detach vdisk") -Quiet
         }
@@ -121,6 +122,46 @@ try {
     Write-Host "`nPASS  whole-disk image round-trips" -ForegroundColor Green
     Write-Host ("      disk image {0:N1} MB (source disk 512 MB)" -f `
         ((Get-Item $dsk).Length / 1MB))
+
+    # --- restore ----------------------------------------------------------
+    # Onto a 1 GB target, so the GPT has to be relocated: a verbatim copy would
+    # leave the backup table stranded at the 512 MB mark and the extra space
+    # unaddressable. Detach the source first -- restoring a disk verbatim
+    # duplicates its GUIDs, and Windows will hold one of the pair offline.
+    Invoke-Diskpart @("select vdisk file=`"$src`"", "detach vdisk") -Quiet
+
+    $before = @(Get-Disk).Number
+    Invoke-Diskpart @("create vdisk file=`"$tgt`" maximum=1024 type=expandable", "attach vdisk")
+    $tgtDisk = @(Get-Disk).Number | Where-Object { $_ -notin $before }
+    if (-not $tgtDisk) { throw "target vdisk attached but no new disk appeared" }
+    Write-Host "`n[*] bulkhead restore -> disk$tgtDisk (1 GB target, 512 MB image)"
+
+    & $exe restore $dsk "disk$tgtDisk" --yes
+    if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+    Start-Sleep -Seconds 3
+
+    $rp = Get-Partition -DiskNumber $tgtDisk | Where-Object DriveLetter | Select-Object -First 1
+    if (-not $rp) {
+        # nothing auto-mounted it; give the data partition a letter ourselves
+        $rp = Get-Partition -DiskNumber $tgtDisk |
+              Where-Object { $_.Size -gt 100MB } | Select-Object -First 1
+        if (-not $rp) { throw "restored disk has no data partition" }
+        $rp | Add-PartitionAccessPath -AssignDriveLetter
+        Start-Sleep -Seconds 2
+        $rp = Get-Partition -DiskNumber $tgtDisk -PartitionNumber $rp.PartitionNumber
+    }
+    $rHash = (Get-FileHash "$($rp.DriveLetter):\hello.txt").Hash
+    Write-Host "[*] restored volume is $($rp.DriveLetter):  $rHash"
+    if ($rHash -ne $srcHash) { throw "FAIL  restored hashes differ" }
+
+    # The relocated GPT is what makes the extra 500 MB addressable at all.
+    $free = (Get-Disk -Number $tgtDisk).LargestFreeExtent
+    Write-Host ("[*] free space on the restored disk: {0:N1} MB" -f ($free / 1MB))
+    if ($free -lt 400MB) {
+        throw "FAIL  GPT was not extended; only $([int]($free/1MB)) MB usable of the extra 512 MB"
+    }
+
+    Write-Host "`nPASS  restore to a larger disk, GPT relocated" -ForegroundColor Green
 }
 finally {
     Detach-All

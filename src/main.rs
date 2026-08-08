@@ -4,6 +4,7 @@
 //! Windows already mounts one as a drive, already does differencing chains for
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
+mod gpt;
 mod media;
 mod snap;
 mod util;
@@ -490,6 +491,121 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     Ok(())
 }
 
+/// Write an image back over a whole disk.
+///
+/// Destructive and not undoable, so it refuses the disk hosting the running
+/// system and asks before writing. From the recovery media the running system
+/// is a RAM disk, which is the whole point of having the media.
+fn cmd_restore(image: &str, target: &str, yes: bool) -> Res<()> {
+    let Some(disk) = disk_arg(target) else {
+        return Err(format!(
+            "{target:?} is not a disk. restore writes a whole disk (e.g. disk2).\n    \
+             For individual files, mount the image and copy them out."
+        ).into());
+    };
+
+    let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
+    if sys.trim() == disk.to_string() {
+        return Err(format!(
+            "disk {disk} holds the running C:. Boot the recovery media and restore from there."
+        ).into());
+    }
+
+    let vhd = Vhd::open(image, false)?;
+    vhd.attach(true, false, false)?;
+    let r = restore_inner(&vhd, disk, yes);
+    let _ = vhd.detach();
+    r
+}
+
+fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
+    let src = Raw::open(&vhd.physical_path()?, false).ctx("open image")?;
+    let src_size = src.len()?;
+
+    let dst_path = format!(r"\\.\PhysicalDrive{disk}");
+    let dst = Raw::open(&dst_path, true).ctx("open target disk")?;
+    let dst_size = dst.len()?;
+    let sector = dst.sector_size()? as u64;
+    if dst_size < src_size {
+        return Err(format!(
+            "target is {} but the image needs {}", human(dst_size), human(src_size)
+        ).into());
+    }
+
+    let desc = ps(&format!(
+        "Get-Disk -Number {disk} | ForEach-Object {{ \"$($_.FriendlyName) -- $($_.PartitionStyle)\" }}"
+    ))?;
+    eprintln!("\n[!] This ERASES disk {disk}: {} ({})", desc.trim(), human(dst_size));
+    eprintln!("[!] Restoring {} from the image. There is no undo.", human(src_size));
+    if !yes {
+        eprint!("    Type YES to continue: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != "YES" {
+            return Err("cancelled".into());
+        }
+    }
+
+    // Offline so Windows releases any volumes it has mounted on the target;
+    // sectors owned by a mounted volume cannot be written raw.
+    ps(&format!(
+        "Set-Disk -Number {disk} -IsOffline $true
+         Set-Disk -Number {disk} -IsReadOnly $false"
+    ))?;
+
+    Region {
+        src: &src, src_off: 0, dst: &dst, dst_off: 0, len: src_size,
+        delta: false, alloc: None, tail_slack: 0, label: "disk",
+    }.run()?;
+
+    if dst_size > src_size {
+        grow_gpt(&dst, dst_size, sector)?;
+    }
+
+    drop(dst);
+    ps(&format!("Set-Disk -Number {disk} -IsOffline $false"))?;
+    eprintln!("[+] disk {disk} restored");
+    Ok(())
+}
+
+/// After restoring a smaller image onto a bigger disk, the copied GPT still
+/// describes the old disk and its backup table sits stranded mid-disk. Move it
+/// to the end so the extra space is addressable and firmware accepts the table.
+fn grow_gpt(dst: &Raw, dst_size: u64, sector: u64) -> Res<()> {
+    let mut lba1 = vec![0u8; sector as usize];
+    dst.seek(sector)?;
+    if dst.read(&mut lba1)? != sector as usize {
+        return Err("could not read the restored partition table".into());
+    }
+
+    let Some(f) = gpt::relocate(&lba1, dst_size, sector) else {
+        eprintln!("[*] not a GPT disk; partition table left exactly as imaged");
+        return Ok(());
+    };
+
+    // The entry array moves wholesale; only the two headers get rewritten.
+    let mut entries = vec![0u8; f.entries_bytes as usize];
+    dst.seek(f.source_entries_lba * sector)?;
+    dst.read(&mut entries)?;
+    dst.seek(f.entries_lba * sector)?;
+    dst.write_all(&entries)?;
+
+    let mut sec = vec![0u8; sector as usize];
+    sec[..f.primary.len()].copy_from_slice(&f.primary);
+    dst.seek(sector)?;
+    dst.write_all(&sec)?;
+
+    sec.fill(0);
+    sec[..f.backup.len()].copy_from_slice(&f.backup);
+    dst.seek(f.last_lba * sector)?;
+    dst.write_all(&sec)?;
+
+    eprintln!("[*] GPT extended to {} ({} spare)",
+              human(dst_size), human(dst_size - (f.last_lba + 1) * sector + sector));
+    Ok(())
+}
+
 fn cmd_mount(path: &str, rw: bool) -> Res<()> {
     let vhd = Vhd::open(path, rw)?;
     vhd.attach(!rw, true, true)?;
@@ -518,6 +634,10 @@ bulkhead -- block-level backup and recovery for Windows
       Attach the image as a drive. Read-only unless --rw.
 
   bulkhead unmount <IMAGE.vhdx>
+
+  bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
+      ERASE a disk and write the image back over it. Asks first.
+      A bigger target keeps its extra space: the GPT is extended to fit.
 
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
@@ -550,6 +670,7 @@ fn main() {
         ["image", vol, out] => cmd_image(vol, out, !flag("--no-snapshot"), opt("--from")),
         ["mount", img] => cmd_mount(img, flag("--rw")),
         ["unmount", img] => cmd_unmount(img),
+        ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
         _ => { eprintln!("{USAGE}"); std::process::exit(2); }
     };

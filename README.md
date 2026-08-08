@@ -48,6 +48,7 @@ target\release\bulkhead.exe
 bulkhead image <VOL|diskN> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
 bulkhead mount <IMAGE.vhdx> [--rw]
 bulkhead unmount <IMAGE.vhdx>
+bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
 bulkhead media <OUT.iso>
 ```
 
@@ -115,7 +116,8 @@ between the two images:
 - [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
 - [x] **used-clusters only** (`FSCTL_GET_VOLUME_BITMAP`) — free space is never
       read and never written
-- [ ] `restore` — write a partition back to a live disk
+- [x] `restore` — erase a disk and write an image back, GPT relocated if the
+      target is bigger. Refuses the disk hosting the running system
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
