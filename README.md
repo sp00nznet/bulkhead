@@ -52,6 +52,7 @@ bulkhead unmount <IMAGE.vhdx>
 bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
 bulkhead part list <diskN>
 bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
+bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead media <OUT.iso>
 ```
 
@@ -142,8 +143,9 @@ The five things people currently pay for. Each one builds on the last:
 2. **Partition manager** — **done for GPT.** `part move` is the operation
    nobody gives away; see below for what is deliberately left to Windows.
    Outstanding: MBR disks are rejected outright.
-3. **Data recovery GUI** — TestDisk and PhotoRec are free and capable; the UX
-   is the product. Mostly integration, not new science.
+3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
+   table is gone and rebuilds it. Outstanding: undelete, file carving, and the
+   GUI itself.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
    anyway; exposing it as a mountable volume (WinFsp) is nearly free once the
    parser exists.
@@ -200,6 +202,41 @@ overlapping move loses the overlap. Image the disk first.
 
 `part move` refuses the disk holding the running system; do that from the
 recovery media.
+
+## Recovering a lost partition table
+
+```powershell
+bulkhead scan disk2              # read-only: what is actually on there
+bulkhead scan disk2 --rebuild    # write a table pointing at it
+```
+
+A partition table is a few kilobytes of pointers. Losing it does not touch the
+filesystems — each one still opens with a header saying what it is and how big
+it is, so scanning for those headers reconstructs the table. Thirteen
+signatures, ported from [partrevive](https://github.com/sp00nznet/partrevive):
+NTFS, exFAT, FAT12/16/32, ext2/3/4, btrfs, XFS, F2FS, swap, plus LUKS and LVM
+which are reported but never sized (you cannot size a container from its
+header).
+
+Every detector re-reads the device to confirm the magic and returns the
+volume's **own** recorded size, so nothing is truncated by a guess. Candidates
+must start on a sector boundary, which kills almost every false positive from
+file contents.
+
+Two things a naive signature scan gets wrong, both handled:
+
+- **Backup superblocks.** ext, XFS, FAT and f2fs keep spare copies of their
+  superblock inside the filesystem, and a copy re-derives the same size — so it
+  looks like an identical partition starting partway into the real one. Same
+  type, same size, contained in an earlier candidate is always a copy.
+- **Ghosts.** A disk that was repartitioned still carries the old layout's boot
+  sectors, reporting plausible sizes for filesystems that no longer exist
+  there. For NTFS the boot sector is followed to the `$MFT` and checked: a
+  ghost's boot sector survives, its `$MFT` does not.
+
+Where two candidates still claim the same ground, the larger wins and the other
+is reported as skipped. `--rebuild` saves the existing table to a file first,
+and only writes partition entries — filesystem contents are never touched.
 
 ## Design notes
 

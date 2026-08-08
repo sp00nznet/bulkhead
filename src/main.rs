@@ -6,6 +6,7 @@
 mod bitmap;
 mod gpt;
 mod media;
+mod scan;
 mod snap;
 mod util;
 mod vhdx;
@@ -606,6 +607,93 @@ fn grow_gpt(dst: &Raw, dst_size: u64, src_size: u64, sector: u64) -> Res<()> {
     Ok(())
 }
 
+/// Find filesystems whose partition table is gone, and optionally rebuild it.
+fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
+    let path = format!(r"\\.\PhysicalDrive{disk_no}");
+    let disk = Raw::open(&path, false).ctx("open disk")?;
+    let size = disk.len()?;
+    eprintln!("[*] scanning {path} ({})", human(size));
+
+    let found = scan::scan(&disk, size)?;
+    if found.is_empty() {
+        eprintln!("[*] no filesystems found");
+        return Ok(());
+    }
+
+    let (keep, dropped) = scan::resolve(&found);
+    eprintln!("\n{} candidate(s):", found.len());
+    for c in &found {
+        let mark = if c.report_only { "report-only" }
+            else if keep.iter().any(|k| k.start_lba == c.start_lba) { "use" }
+            else { "overlaps, skipped" };
+        eprintln!("  {:>12}  {:>10}  {:<6} {:<20} [{}]",
+                  human(c.start_lba * 512), human(c.bytes()), c.fstype, c.label, mark);
+        if !c.note.is_empty() {
+            eprintln!("               {}", c.note);
+        }
+    }
+    if !dropped.is_empty() {
+        eprintln!("\n[*] {} candidate(s) overlap something larger and were skipped.",
+                  dropped.len());
+        eprintln!("    Those are usually ghosts of an earlier layout.");
+    }
+
+    if !rebuild {
+        eprintln!("\n[*] read-only. Add --rebuild to write a partition table for the {} kept.",
+                  keep.len());
+        return Ok(());
+    }
+    if keep.is_empty() {
+        return Err("nothing usable to rebuild from".into());
+    }
+
+    let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
+    if sys.trim() == disk_no.to_string() {
+        return Err(format!("disk {disk_no} holds the running C:").into());
+    }
+
+    // Whatever table is there now gets saved first: the scan is a guess, and
+    // being able to put the old one back is the difference between a recovery
+    // attempt and a one-way door.
+    let backup = std::env::current_dir()?.join(format!("disk{disk_no}-table-backup.bin"));
+    let mut head = vec![0u8; 34 * 512];
+    disk.seek(0)?;
+    disk.read(&mut head)?;
+    std::fs::write(&backup, &head)?;
+    eprintln!("\n[*] existing table saved to {}", backup.display());
+
+    eprintln!("[!] This REPLACES the partition table on disk {disk_no} with {} entries.",
+              keep.len());
+    eprintln!("[!] Filesystem contents are not touched, only the table.");
+    if !yes {
+        eprint!("    Type YES to continue: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != "YES" {
+            return Err("cancelled".into());
+        }
+    }
+
+    // ponytail: New-Partition takes an explicit offset and size, so Windows
+    // writes the GPT, the protective MBR and the GUIDs. Writing a table
+    // builder here would be a lot of code to do what the OS already does.
+    // It only writes table entries; the filesystems underneath are untouched.
+    ps(&format!(
+        "Clear-Disk -Number {disk_no} -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
+         Initialize-Disk -Number {disk_no} -PartitionStyle GPT -Confirm:$false | Out-Null"
+    ))?;
+    for c in &keep {
+        ps(&format!(
+            "New-Partition -DiskNumber {disk_no} -Offset {} -Size {} -GptType '{}' | Out-Null",
+            c.start_lba * 512, c.bytes(), c.gpt_type
+        )).map_err(|e| format!("failed to add {} at {}: {e}", c.fstype, human(c.start_lba * 512)))?;
+        eprintln!("[+] {} at {} ({})", c.fstype, human(c.start_lba * 512), human(c.bytes()));
+    }
+    eprintln!("[+] table rebuilt. If it is wrong, restore {}", backup.display());
+    Ok(())
+}
+
 /// `1048576`, `100MB`, `2GB`, `512K`. Plain numbers are bytes.
 fn parse_size(s: &str) -> Option<u64> {
     let t = s.trim().to_ascii_uppercase().replace('B', "");
@@ -858,6 +946,11 @@ bulkhead -- block-level backup and recovery for Windows
       Slide a partition to a new offset. Windows cannot do this at all;
       it is also how you extend into free space that sits to the LEFT.
 
+  bulkhead scan <diskN> [--rebuild] [--yes]
+      Find filesystems on a disk whose partition table is lost, and
+      optionally write a new table pointing at them. The scan is
+      read-only; --rebuild saves the old table first.
+
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
@@ -891,6 +984,9 @@ fn main() {
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
+        ["scan", d] => disk_arg(d)
+            .ok_or_else(|| format!("{d:?} is not a disk").into())
+            .and_then(|n| cmd_scan(n, flag("--rebuild"), flag("--yes"))),
         ["part", "list", d] => disk_arg(d)
             .ok_or_else(|| format!("{d:?} is not a disk").into())
             .and_then(cmd_part_list),

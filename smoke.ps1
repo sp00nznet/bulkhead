@@ -204,6 +204,43 @@ try {
     & $exe part list "disk$tgtDisk"
 
     Write-Host "`nPASS  partition moved, filesystem intact" -ForegroundColor Green
+
+    # --- scan and rebuild --------------------------------------------------
+    # Destroy the partition table but not the data, which is exactly what a
+    # bad `clean`, a botched installer or a corrupt GPT leaves behind.
+    #
+    # This disk is a deliberately nasty case: the move above copied the volume
+    # from 16 MB to 116 MB without erasing the source, so the old NTFS boot
+    # sector is still sitting at 16 MB claiming the same size. The scan has to
+    # tell the live filesystem from that ghost.
+    Write-Host "`n[*] wiping the partition table on disk$tgtDisk (data left alone)"
+    Invoke-Diskpart @("select disk $tgtDisk", "clean")
+    Start-Sleep -Seconds 2
+
+    if (Get-Partition -DiskNumber $tgtDisk -ErrorAction SilentlyContinue) {
+        throw "table should be gone but partitions are still listed"
+    }
+
+    Write-Host "`n[*] bulkhead scan disk$tgtDisk --rebuild"
+    & $exe scan "disk$tgtDisk" --rebuild --yes
+    if ($LASTEXITCODE -ne 0) { throw "scan --rebuild failed" }
+    Start-Sleep -Seconds 3
+
+    $rec = Get-Partition -DiskNumber $tgtDisk | Sort-Object Size -Descending | Select-Object -First 1
+    if (-not $rec) { throw "FAIL  rebuild produced no partitions" }
+    if ($rec.Offset -ne $newOffset) {
+        throw "FAIL  rebuilt partition at $($rec.Offset), expected the live one at $newOffset"
+    }
+    if (-not $rec.DriveLetter) {
+        $rec | Add-PartitionAccessPath -AssignDriveLetter
+        Start-Sleep -Seconds 2
+        $rec = Get-Partition -DiskNumber $tgtDisk -PartitionNumber $rec.PartitionNumber
+    }
+    $recHash = (Get-FileHash "$($rec.DriveLetter):\hello.txt").Hash
+    Write-Host "[*] recovered volume is $($rec.DriveLetter):  $recHash"
+    if ($recHash -ne $srcHash) { throw "FAIL  recovered data does not match" }
+
+    Write-Host "`nPASS  lost partition table rebuilt from filesystem headers" -ForegroundColor Green
 }
 finally {
     Detach-All
