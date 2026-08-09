@@ -308,8 +308,6 @@ the MFT survives; carve only when it does not.
 bulkhead gui
 ```
 
-![](docs/gui.png)
-
 Native Win32 controls, no toolkit, no new dependencies — so it runs anywhere
 USER32 does, including WinPE, where the recovery media actually needs it.
 
