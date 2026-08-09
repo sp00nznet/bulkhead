@@ -246,45 +246,53 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
 
 /// NVMe Identify Controller, for the format and sanitize capability words.
 fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
-    // The command and its returned data share one buffer, placed by offsets.
-    // Those offsets are measured from the start of the header to its Command
-    // field -- not from the struct's size, which includes tail padding. Four
-    // bytes of difference is enough for the driver to reject the whole thing
-    // with ERROR_INVALID_PARAMETER.
-    const CMD: usize = 64; // NVMe commands are 64 bytes
+    /// The structure version, which is 1 -- not the size of anything. Passing
+    /// a size here is rejected outright.
+    const STRUCTURE_VERSION: u32 = 1;
+    /// Says the 64 bytes of command are an admin command rather than an I/O
+    /// one. Without it the request is malformed.
+    const NVME_ADMIN_COMMAND: u32 = 0x01;
+    const ADAPTER_REQUEST: u32 = 0x8000_0000;
+    const CMD: usize = 64;
+    const ERR: usize = 64;
     const DATA: usize = 4096;
-    let head = std::mem::offset_of!(STORAGE_PROTOCOL_COMMAND, Command);
-    let mut buf = vec![0u8; head + CMD + DATA];
 
-    {
+    // Everything is placed by offsets measured from the start of the header to
+    // its Command field -- not from the struct's size, which has tail padding.
+    let head = std::mem::offset_of!(STORAGE_PROTOCOL_COMMAND, Command);
+    let err_at = head + CMD;
+    let data_at = err_at + ERR;
+    let mut buf = vec![0u8; data_at + DATA];
+
+    unsafe {
         let c = buf.as_mut_ptr() as *mut STORAGE_PROTOCOL_COMMAND;
-        unsafe {
-            (*c).Version = head as u32;
-            (*c).Length = head as u32;
-            (*c).ProtocolType = STORAGE_PROTOCOL_TYPE(3); // ProtocolTypeNvme
-            (*c).Flags = 0x8000_0000; // ADAPTER_REQUEST
-            (*c).CommandLength = CMD as u32;
-            (*c).DataFromDeviceTransferLength = DATA as u32;
-            (*c).DataFromDeviceBufferOffset = (head + CMD) as u32;
-            (*c).TimeOutValue = 10;
-        }
+        (*c).Version = STRUCTURE_VERSION;
+        (*c).Length = size_of::<STORAGE_PROTOCOL_COMMAND>() as u32;
+        (*c).ProtocolType = STORAGE_PROTOCOL_TYPE(3); // ProtocolTypeNvme
+        (*c).Flags = ADAPTER_REQUEST;
+        (*c).CommandLength = CMD as u32;
+        (*c).ErrorInfoLength = ERR as u32;
+        (*c).ErrorInfoOffset = err_at as u32;
+        (*c).DataFromDeviceTransferLength = DATA as u32;
+        (*c).DataFromDeviceBufferOffset = data_at as u32;
+        (*c).CommandSpecific = NVME_ADMIN_COMMAND;
+        (*c).TimeOutValue = 10;
     }
-    // NVMe Identify: opcode 0x06, CDW10 = 1 (Identify Controller).
+    // NVMe command: opcode 0x06 (Identify), CDW10 = 1 (Identify Controller).
     buf[head] = 0x06;
     buf[head + 40..head + 44].copy_from_slice(&1u32.to_le_bytes());
 
     let mut ret = 0u32;
-    let r = unsafe {
+    unsafe {
         DeviceIoControl(
             disk.0, IOCTL_STORAGE_PROTOCOL_COMMAND,
             Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
             Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
             Some(&mut ret), None,
-        )
-    };
-    r.ctx("NVMe Identify Controller")?;
+        ).ctx("NVMe Identify Controller")?;
+    }
 
-    let id = &buf[head + CMD..];
+    let id = &buf[data_at..];
     if id.iter().all(|&b| b == 0) {
         return Err("Identify Controller returned nothing".into());
     }
