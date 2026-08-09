@@ -289,6 +289,9 @@ try {
     1..200 | ForEach-Object { "recover me $_" } | Set-Content $gone
     $goneHash = (Get-FileHash $gone).Hash
     $goneSize = (Get-Item $gone).Length
+    # keep a copy off-volume so a mismatch can be compared byte for byte
+    $goneCopy = Join-Path $work 'deleteme-original.txt'
+    Copy-Item $gone $goneCopy -Force
     Remove-Item $gone -Force
     Remove-Item "$vol\bulk.dat" -Force -ErrorAction SilentlyContinue
     # Flush, or the MFT change may still be sitting in cache
@@ -312,7 +315,22 @@ try {
     $hitHash = (Get-FileHash $hit.FullName).Hash
     Write-Host "[*] deleted  $goneHash"
     Write-Host "[*] recovered $hitHash  ($($hit.Name))"
-    if ($hitHash -ne $goneHash) { throw "FAIL  recovered contents differ" }
+    if ($hitHash -ne $goneHash) {
+        # Right length, wrong bytes. What the bytes actually are says which:
+        # zeros means the clusters were released and cleared, other readable
+        # text means we read the wrong place, and a shifted copy means the
+        # run decoding is off.
+        $want = [IO.File]::ReadAllBytes($goneCopy)[0..63]
+        $got  = [IO.File]::ReadAllBytes($hit.FullName)[0..63]
+        $hex = { param($b) ($b | ForEach-Object { $_.ToString('x2') }) -join '' }
+        $txt = { param($b) -join ($b | ForEach-Object {
+                    if ($_ -ge 32 -and $_ -lt 127) { [char]$_ } else { '.' } }) }
+        Write-Host "  expected hex $(& $hex $want)"
+        Write-Host "  actual   hex $(& $hex $got)"
+        Write-Host "  expected txt $(& $txt $want)"
+        Write-Host "  actual   txt $(& $txt $got)"
+        throw "FAIL  recovered contents differ"
+    }
 
     Write-Host "`nPASS  deleted file recovered byte-for-byte" -ForegroundColor Green
 }
