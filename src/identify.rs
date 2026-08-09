@@ -272,10 +272,22 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
     // ones are left says what happened to the disk since: anything that
     // reformats writes over the front and rarely touches the last megabyte, so
     // labels surviving only at the end mean this membership is history.
+    let end = labels.iter().filter(|l| **l == "L2" || **l == "L3").count();
     lines.push(format!("labels present: {} of 4 ({})", labels.len(), labels.join(", ")));
-    if front == 0 {
-        lines.push("ONLY the end-of-disk labels survive -- the front has been                     overwritten since, so this pool membership is probably stale".into());
+    if labels.len() == 4 {
+        lines.push("all four intact, consistent with a member still in use".into());
+    } else {
+        let mut why = String::from("a member in use carries all four");
+        if front == 0 {
+            why.push_str("; the front copies are gone, so something has been written over the start");
+        }
+        if end == 0 {
+            why.push_str("; the end copies are gone, which is what repartitioning or shrinking does");
+        }
+        lines.push(format!("{why}"));
+        lines.push("treat this as a former membership unless zpool says otherwise".into());
     }
+    lines.push("the fields above are what the label recorded when it was last written,                 not the state now".into());
     lines.push("import with zpool on a system that speaks ZFS; bulkhead does not read it".into());
     Some(Report { kind: "ZFS pool member", lines })
 }
