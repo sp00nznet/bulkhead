@@ -123,7 +123,15 @@ umount /tmp/bhmnt
         Write-Host "  (mount check skipped: WinFsp not installed)" -ForegroundColor DarkGray
         return
     }
-    $letter = 'X:'
+    # Never a hardcoded letter: mounting over a mapped network drive or an
+    # existing volume would shadow it, and the test would then be reading
+    # someone else's filesystem.
+    $used = (Get-PSDrive -PSProvider FileSystem).Name
+    $letter = (73..90 | ForEach-Object { [char]$_ } |
+               Where-Object { $_ -notin $used } | Select-Object -First 1)
+    if (-not $letter) { throw "no free drive letter to mount on" }
+    $letter = "${letter}:"
+    Write-Host "  mounting on $letter (first free letter)" -ForegroundColor DarkGray
     $proc = Start-Process $exe -ArgumentList @('mount-fs', $local, $letter) `
                           -PassThru -WindowStyle Hidden
     try {
