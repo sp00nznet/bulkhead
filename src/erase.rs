@@ -167,9 +167,13 @@ fn device_property(disk: &Raw, caps: &mut Caps) -> Res<()> {
         let end = buf[o..].iter().position(|&c| c == 0).unwrap_or(0) + o;
         String::from_utf8_lossy(&buf[o..end]).trim().to_string()
     };
-    caps.firmware = at(12);
-    caps.model = format!("{} {}", at(8), at(16)).trim().to_string();
-    caps.serial = at(20);
+    // STORAGE_DEVICE_DESCRIPTOR: Version, Size, DeviceType, DeviceTypeModifier,
+    // RemovableMedia, CommandQueueing, then four offsets and the bus type.
+    let vendor = at(12);
+    let product = at(16);
+    caps.firmware = at(20); // ProductRevision
+    caps.serial = at(24);
+    caps.model = format!("{vendor} {product}").trim().to_string();
     caps.bus = Some(match buf.get(28).copied().unwrap_or(0) {
         0x0B => Bus::Ata,
         0x11 => Bus::Nvme,
@@ -184,7 +188,9 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
     let mut data = vec![0u8; 512];
     let mut apt = ATA_PASS_THROUGH_DIRECT {
         Length: size_of::<ATA_PASS_THROUGH_DIRECT>() as u16,
-        AtaFlags: 0x02, // ATA_FLAGS_DATA_IN
+        // DRDY_REQUIRED | DATA_IN: the drive must be ready, and this command
+        // returns data.
+        AtaFlags: 0x01 | 0x02,
         DataTransferLength: 512,
         TimeOutValue: 10,
         DataBuffer: data.as_mut_ptr() as *mut c_void,
@@ -291,15 +297,32 @@ fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
     Ok(())
 }
 
-/// Everything the drive will tell us about erasing itself. Read-only.
-pub fn capabilities(disk: &Raw) -> Caps {
+/// Everything the drive will tell us about erasing itself, and why any probe
+/// did not answer.
+///
+/// The failures matter as much as the results: a drive reporting no erase
+/// command usually means the query did not reach it, not that a modern SSD
+/// cannot erase itself. Saying which probe failed and how is the difference
+/// between a wrong answer and a diagnosable one.
+pub fn capabilities(disk: &Raw) -> (Caps, Vec<String>) {
     let mut caps = Caps::default();
-    // Each of these fails on the wrong kind of drive, which is expected: a
-    // NVMe device has no ATA IDENTIFY and vice versa.
-    let _ = device_property(disk, &mut caps);
-    let _ = ata_identify(disk, &mut caps);
-    let _ = nvme_identify(disk, &mut caps);
-    caps
+    let mut notes = Vec::new();
+    let mut note = |what: &str, r: Res<()>| {
+        if let Err(e) = r {
+            notes.push(format!("{what}: {e}"));
+        }
+    };
+    note("device properties", device_property(disk, &mut caps));
+    // Each of these is expected to fail on the wrong kind of drive: an NVMe
+    // device has no ATA IDENTIFY, and vice versa.
+    let is_nvme = caps.bus == Some(Bus::Nvme);
+    if !is_nvme {
+        note("ATA IDENTIFY", ata_identify(disk, &mut caps));
+    }
+    if caps.bus.is_none() || is_nvme {
+        note("NVMe Identify Controller", nvme_identify(disk, &mut caps));
+    }
+    (caps, notes)
 }
 
 pub fn report(caps: &Caps) -> Vec<String> {

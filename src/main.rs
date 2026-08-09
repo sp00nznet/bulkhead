@@ -998,10 +998,14 @@ fn cmd_erase_info(target: &str) -> Res<()> {
         return Err(format!("{target:?} is not a disk; erase works on whole drives").into());
     };
     let path = format!(r"\\.\PhysicalDrive{n}");
-    let disk = Raw::open(&path, false).ctx("open disk")?;
+    // Pass-through IOCTLs need write access on the handle even though this
+    // reads only. Nothing here issues a command that changes the drive.
+    let disk = Raw::open(&path, true)
+        .or_else(|_| Raw::open(&path, false))
+        .ctx("open disk")?;
     eprintln!("[*] {path} ({})", human(disk.len().unwrap_or(0)));
 
-    let caps = erase::capabilities(&disk);
+    let (caps, notes) = erase::capabilities(&disk);
     for l in erase::report(&caps) {
         eprintln!("  {l}");
     }
@@ -1015,6 +1019,9 @@ fn cmd_erase_info(target: &str) -> Res<()> {
     }
     for b in caps.blockers() {
         eprintln!("[!] {b}");
+    }
+    for n in notes {
+        eprintln!("[*] {n}");
     }
     Ok(())
 }
