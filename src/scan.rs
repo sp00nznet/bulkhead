@@ -58,10 +58,10 @@ impl Candidate {
         self
     }
     pub fn end_lba(&self) -> u64 {
-        self.start_lba + self.sectors - 1
+        self.start_lba.saturating_add(self.sectors).saturating_sub(1)
     }
     pub fn bytes(&self) -> u64 {
-        self.sectors * SECTOR
+        self.sectors.saturating_mul(SECTOR)
     }
 }
 
@@ -85,6 +85,27 @@ fn be32(b: &[u8]) -> u64 {
 
 fn be64(b: &[u8]) -> u64 {
     u64::from_be_bytes(b[..8].try_into().unwrap())
+}
+
+/// A shift whose amount came off the disk.
+///
+/// Every value feeding one of these is arbitrary data in practice: a scan
+/// walks the whole disk, and some of it will match a magic by chance. Garbage
+/// has to reject the candidate, not panic the process. The ceiling is a
+/// generous bound on any real block or cluster size.
+fn shl(base: u64, amount: u64) -> Option<u64> {
+    if amount >= 32 {
+        return None;
+    }
+    let v = base << amount;
+    (v >= SECTOR && v <= (1 << 26)).then_some(v)
+}
+
+/// Convert a count of `unit`-sized blocks into sectors, rejecting anything
+/// that does not fit a plausible disk.
+fn sectors_of(count: u64, unit: u64) -> Option<u64> {
+    let per = (unit / SECTOR).max(1);
+    count.checked_mul(per).filter(|&s| s > 0 && s < (1 << 40))
 }
 
 fn cstr(b: &[u8]) -> String {
@@ -125,16 +146,16 @@ fn ntfs(disk: &Raw, start: u64) -> Option<Candidate> {
     // has been overwritten by whatever occupies that ground now.
     let bps = le(&bs[0x0B..0x0D]);
     let spc = bs[0x0D] as i8;
-    let cluster = if spc > 0 {
-        bps * spc as u64
-    } else {
-        1u64 << (-(spc as i32) as u32)
-    };
-    if !(256..=65536).contains(&bps) || cluster == 0 || cluster > (1 << 20) {
+    if !(256..=65536).contains(&bps) {
         return None;
     }
+    let cluster = if spc > 0 {
+        bps.checked_mul(spc as u64).filter(|&c| c <= (1 << 20))?
+    } else {
+        shl(1, -(spc as i32) as u64)?
+    };
     let mft_off = le(&bs[0x30..0x38]).checked_mul(cluster)?;
-    if mft_off >= total * bps {
+    if mft_off >= total.checked_mul(bps)? {
         return None;
     }
     let rec = at(disk, start + mft_off, 512)?;
@@ -152,7 +173,7 @@ fn ntfs(disk: &Raw, start: u64) -> Option<Candidate> {
     //
     // Missing it is not disqualifying -- a genuinely truncated volume is still
     // worth recovering -- so it raises confidence rather than acting as a veto.
-    if let Some(bak) = at(disk, start + total * bps, 512) {
+    if let Some(bak) = at(disk, start.checked_add(total.checked_mul(bps)?)?, 512) {
         if &bak[3..11] == b"NTFS    " && bak[510..512] == [0x55, 0xAA] {
             c.confidence += 1;
         }
@@ -166,7 +187,7 @@ fn exfat(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     let len = le(&bs[0x48..0x50]);
-    (len > 0).then(|| Candidate::new(start, len, "exfat", BASIC))
+    (len > 0 && len < (1 << 40)).then(|| Candidate::new(start, len, "exfat", BASIC))
 }
 
 fn fat(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -195,12 +216,9 @@ fn ext(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     let blocks = le(&sb[0x04..0x08]);
-    let block_size = 1024u64 << le(&sb[0x18..0x1C]);
-    if blocks == 0 || block_size < SECTOR {
-        return None;
-    }
+    let block_size = shl(1024, le(&sb[0x18..0x1C]))?;
     Some(
-        Candidate::new(start, blocks * (block_size / SECTOR), "ext4", LINUX)
+        Candidate::new(start, sectors_of(blocks, block_size)?, "ext4", LINUX)
             .with_label(cstr(&sb[0x78..0x88])),
     )
 }
@@ -211,7 +229,8 @@ fn swap(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     let last_page = le(&page[0x408..0x40C]);
-    (last_page > 0).then(|| Candidate::new(start, (last_page + 1) * (4096 / SECTOR), "swap", SWAP))
+    let sectors = sectors_of(last_page.checked_add(1)?, 4096)?;
+    (last_page > 0).then(|| Candidate::new(start, sectors, "swap", SWAP))
 }
 
 fn btrfs(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -229,8 +248,9 @@ fn btrfs(disk: &Raw, start: u64) -> Option<Candidate> {
     if total == 0 || !(512..=65536).contains(&sectorsize) || !sectorsize.is_power_of_two() {
         return None;
     }
+    let sectors = (total / SECTOR).min(1 << 40);
     Some(
-        Candidate::new(start, total / SECTOR, "btrfs", LINUX)
+        Candidate::new(start, sectors, "btrfs", LINUX)
             .with_label(cstr(&sb[0x12B..0x22B])),
     )
 }
@@ -247,7 +267,7 @@ fn xfs(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     Some(
-        Candidate::new(start, dblocks * (blocksize / SECTOR), "xfs", LINUX)
+        Candidate::new(start, sectors_of(dblocks, blocksize)?, "xfs", LINUX)
             .with_label(cstr(&bs[0x6C..0x78])),
     )
 }
@@ -257,12 +277,9 @@ fn f2fs(disk: &Raw, start: u64) -> Option<Candidate> {
     if sb[0..4] != [0x10, 0x20, 0xF5, 0xF2] {
         return None;
     }
-    let blocksize = 1u64 << le(&sb[0x10..0x14]);
+    let blocksize = shl(1, le(&sb[0x10..0x14]))?;
     let blocks = le(&sb[0x24..0x2C]);
-    if blocks == 0 || blocksize < SECTOR {
-        return None;
-    }
-    Some(Candidate::new(start, blocks * (blocksize / SECTOR), "f2fs", LINUX))
+    Some(Candidate::new(start, sectors_of(blocks, blocksize)?, "f2fs", LINUX))
 }
 
 fn luks(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -340,7 +357,8 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
                         continue;
                     }
                     if let Some(c) = detect(disk, start) {
-                        if c.sectors >= MIN_SECTORS && c.end_lba() * SECTOR < disk_size {
+                        let end = c.end_lba().checked_mul(SECTOR).unwrap_or(u64::MAX);
+                        if c.sectors >= MIN_SECTORS && end < disk_size {
                             seen_starts.push(c.start_lba * SECTOR);
                             eprintln!("\r  found {} at {} ({})      ",
                                       c.fstype, human(c.start_lba * SECTOR), human(c.bytes()));
