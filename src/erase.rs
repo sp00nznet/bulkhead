@@ -94,6 +94,11 @@ impl Caps {
         if self.ata_sanitize_block {
             v.push("ata-sanitize-block");
         }
+        // Slow -- it writes the whole surface -- but a real erase, and the only
+        // one many enterprise drives offer.
+        if self.ata_sanitize_overwrite {
+            v.push("ata-sanitize-overwrite");
+        }
         if self.ata_security && !self.ata_frozen {
             v.push("ata-security-erase");
         }
@@ -241,10 +246,14 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
 
 /// NVMe Identify Controller, for the format and sanitize capability words.
 fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
-    // The command and its returned data share one buffer, laid out by offsets.
+    // The command and its returned data share one buffer, placed by offsets.
+    // Those offsets are measured from the start of the header to its Command
+    // field -- not from the struct's size, which includes tail padding. Four
+    // bytes of difference is enough for the driver to reject the whole thing
+    // with ERROR_INVALID_PARAMETER.
     const CMD: usize = 64; // NVMe commands are 64 bytes
     const DATA: usize = 4096;
-    let head = size_of::<STORAGE_PROTOCOL_COMMAND>();
+    let head = std::mem::offset_of!(STORAGE_PROTOCOL_COMMAND, Command);
     let mut buf = vec![0u8; head + CMD + DATA];
 
     {
@@ -413,6 +422,22 @@ mod tests {
         assert!(caps.methods().is_empty(), "a frozen drive offers nothing");
         let why = caps.blockers().join(" ");
         assert!(why.contains("FROZEN"), "must say what to do about it: {why}");
+    }
+
+    #[test]
+    fn overwrite_sanitize_counts_as_a_method() {
+        // An 18 TB enterprise drive offers exactly this and nothing else:
+        // frozen security, sanitize overwrite. Omitting it reports the drive
+        // as unerasable when it is not.
+        let caps = Caps {
+            ata_security: true,
+            ata_frozen: true,
+            ata_sanitize: true,
+            ata_sanitize_overwrite: true,
+            ..Default::default()
+        };
+        assert_eq!(caps.methods(), vec!["ata-sanitize-overwrite"]);
+        assert!(caps.blockers().is_empty());
     }
 
     #[test]
