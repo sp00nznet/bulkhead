@@ -5,6 +5,7 @@
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
 mod carve;
+mod ext4;
 mod gpt;
 mod gui;
 mod media;
@@ -855,6 +856,104 @@ fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
     Ok(())
 }
 
+/// Open a target as a raw device plus a byte offset into it.
+fn open_target(target: &str, at: Option<u64>) -> Res<(Raw, u64, String)> {
+    match disk_arg(target) {
+        Some(n) => {
+            let p = format!(r"\\.\PhysicalDrive{n}");
+            let d = Raw::open(&p, false).ctx("open disk")?;
+            Ok((d, at.unwrap_or(0), p))
+        }
+        None => {
+            let p = format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":";
+            let d = Raw::open(&p, false).ctx("open volume")?;
+            Ok((d, 0, p))
+        }
+    }
+}
+
+/// List a directory on a filesystem Windows cannot read.
+fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
+    let (disk, base, name) = open_target(target, at)?;
+    let fs = ext4::Ext::open(&disk, base)?;
+    eprintln!("[*] {name} at {}: ext2/3/4, {}-byte blocks{}",
+              human(base), fs.block_size,
+              if fs.label.is_empty() { String::new() } else { format!(", label {:?}", fs.label) });
+
+    let (ino, is_dir) = fs.resolve(path)?;
+    if !is_dir {
+        eprintln!("  {} ({})", path, human(fs.size_of(ino)?));
+        return Ok(());
+    }
+    let mut entries = fs.read_dir(ino)?;
+    entries.sort_by(|a, b| (!a.is_dir, a.name.to_lowercase()).cmp(&(!b.is_dir, b.name.to_lowercase())));
+    for e in &entries {
+        if e.is_dir {
+            eprintln!("  {:>12}  {}/", "", e.name);
+        } else {
+            let size = fs.size_of(e.inode).unwrap_or(0);
+            eprintln!("  {:>12}  {}", human(size), e.name);
+        }
+    }
+    eprintln!("[*] {} entries", entries.len());
+    Ok(())
+}
+
+/// Copy a file or directory tree off a filesystem Windows cannot read.
+fn cmd_cp(target: &str, at: Option<u64>, path: &str, out_dir: &str) -> Res<()> {
+    let (disk, base, name) = open_target(target, at)?;
+    let fs = ext4::Ext::open(&disk, base)?;
+    eprintln!("[*] {name}: copying {path:?} to {out_dir}");
+    std::fs::create_dir_all(out_dir)?;
+
+    let (ino, is_dir) = fs.resolve(path)?;
+    let leaf = path.rsplit(['/', '\\']).find(|p| !p.is_empty()).unwrap_or("root");
+    let (mut files, mut bytes) = (0u64, 0u64);
+
+    if !is_dir {
+        let data = fs.read_file(ino)?;
+        std::fs::write(std::path::Path::new(out_dir).join(safe_name(leaf)), &data)?;
+        eprintln!("[+] 1 file, {}", human(data.len() as u64));
+        return Ok(());
+    }
+
+    // Iterative rather than recursive: a directory loop on a damaged volume
+    // would take the stack with it.
+    let mut queue = vec![(ino, std::path::PathBuf::from(out_dir).join(safe_name(leaf)))];
+    while let Some((dir_ino, dest)) = queue.pop() {
+        std::fs::create_dir_all(&dest)?;
+        for e in fs.read_dir(dir_ino)? {
+            let child = dest.join(safe_name(&e.name));
+            if e.is_dir {
+                queue.push((e.inode, child));
+            } else {
+                match fs.read_file(e.inode) {
+                    Ok(data) => {
+                        std::fs::write(&child, &data)?;
+                        files += 1;
+                        bytes += data.len() as u64;
+                    }
+                    Err(err) => eprintln!("[!] {}: {err}", e.name),
+                }
+            }
+        }
+    }
+    eprintln!("[+] {files} file(s), {}", human(bytes));
+    Ok(())
+}
+
+/// Names come off another operating system's filesystem; keep them from
+/// naming anything but a file in the output directory.
+fn safe_name(s: &str) -> String {
+    let cleaned: String = s.chars()
+        .map(|c| if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 32 { '_' } else { c })
+        .collect();
+    match cleaned.trim().trim_matches('.') {
+        "" => "_".into(),
+        t => t.to_string(),
+    }
+}
+
 /// A fresh GUID for a disk or partition, in the byte order GPT stores.
 fn new_guid() -> Res<[u8; 16]> {
     let g = windows::core::GUID::new()?;
@@ -1134,6 +1233,11 @@ bulkhead -- block-level backup and recovery for Windows
       Last resort: pull files out by their signatures when no filesystem
       survives. No names, and fragmented files come back truncated.
 
+  bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
+  bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
+      Read ext2/3/4 volumes, which Windows cannot. PATH is inside the
+      filesystem; cp takes a file or a whole directory tree.
+
   bulkhead gui
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
@@ -1172,6 +1276,12 @@ fn main() {
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
         ["gui"] => gui::run_gui(),
+        ["ls", t] => cmd_ls(t, opt("--at").and_then(parse_size), "/"),
+        ["ls", t, path] => cmd_ls(t, opt("--at").and_then(parse_size), path),
+        ["cp", t, path] => match opt("--to") {
+            Some(dir) => cmd_cp(t, opt("--at").and_then(parse_size), path, dir),
+            None => Err("cp needs --to <DIR>".into()),
+        },
         ["carve", t] => match opt("--to") {
             Some(dir) => cmd_carve(t, dir,
                                    opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(5_000)),

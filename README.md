@@ -56,6 +56,8 @@ bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead undo <diskN> <TABLE.bin> [--yes]
 bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
+bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
+bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead gui
 bulkhead media <OUT.iso>
 ```
@@ -139,6 +141,7 @@ stranded behind a partition table describing the old disk.
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
 - [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE
+- [x] `ls` / `cp` — read ext2/3/4 volumes Windows cannot mount
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -157,9 +160,9 @@ The five things people currently pay for. Each one builds on the last:
    **done.** `scan` rebuilds a lost partition table, `undelete` recovers files
    from a surviving MFT, `carve` works from raw signatures when there is none,
    and `bulkhead gui` fronts all of it.
-4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
-   anyway; exposing it as a mountable volume (WinFsp) is nearly free once the
-   parser exists.
+4. **Filesystem drivers** — *in progress.* `ls` and `cp` read ext2/3/4, which
+   Windows cannot. Outstanding: XFS, APFS, HFS+, ext2/3 indirect maps, and
+   exposing them as mountable volumes via WinFsp.
 5. **Certified secure erase** — ATA Secure Erase / NVMe Sanitize plus a signed
    PDF. Every lease return needs the paperwork. A weekend of work; sold for
    real money per drive.
@@ -316,6 +319,28 @@ and pipes its output into the log, so the GUI can get the arguments wrong but
 never the engine. **Destructive commands are deliberately absent** — `restore`,
 `part move` and `scan --rebuild` stay on the command line, where their
 confirmations are.
+
+## Reading ext2/3/4
+
+```powershell
+bulkhead ls disk2 --at 1MB              # what is on the Linux partition
+bulkhead ls disk2 --at 1MB /home/nedch
+bulkhead cp disk2 /home/nedch --to C:\out --at 1MB
+```
+
+This is the filesystem Paragon charges per seat to read. Nothing exotic is
+needed: a superblock says how the volume is laid out, a table of group
+descriptors says where the inodes are, and each inode carries a small tree of
+extents. `--at` is the partition's byte offset, which `bulkhead part list` or
+`bulkhead scan` will tell you; a mounted volume letter needs no offset.
+
+**Read-only, deliberately and permanently.** Writing ext4 safely means
+implementing its journal, and a half-understood journal is how filesystems get
+destroyed. bulkhead reads these; Linux writes them.
+
+Not yet: ext2/ext3 volumes that predate extents use indirect block maps and are
+rejected with a clear message rather than misread. XFS, APFS and HFS+ are the
+next three, and follow the same shape.
 
 ## Design notes
 
