@@ -292,7 +292,7 @@ try {
     Remove-Item $gone -Force
     Remove-Item "$vol\bulk.dat" -Force -ErrorAction SilentlyContinue
     # Flush, or the MFT change may still be sitting in cache
-    Write-Volume -DriveLetter $rec.DriveLetter -ErrorAction SilentlyContinue | Out-Null
+    Write-VolumeCache -DriveLetter $rec.DriveLetter -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 
     $recovered = Join-Path $work 'recovered'
