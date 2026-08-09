@@ -59,6 +59,7 @@ bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead identify <VOL|diskN> [--at <OFFSET>]
 bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
 bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
+bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
 bulkhead gui
 bulkhead media <OUT.iso>
 ```
@@ -144,6 +145,7 @@ stranded behind a partition table describing the old disk.
 - [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE
 - [x] `ls` / `cp` — read ext2/3/4, XFS and HFS+ volumes Windows cannot mount
 - [x] `identify` — RAID/LVM/ZFS/btrfs/bcachefs membership and format recognition
+- [x] `mount-fs` — ext4/XFS/HFS+ as a read-only Windows drive, via WinFsp
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -352,6 +354,21 @@ Not yet, and refused with a clear message rather than misread: ext2/ext3
 volumes predating extents (indirect block maps), XFS files large enough to need
 b-tree forks, HFS+ forks continuing into the extents overflow file, and old HFS
 volumes with HFS+ embedded inside them. APFS and btrfs are next.
+
+### Mounting them as a drive
+
+```powershell
+bulkhead mount-fs disk2 X: --at 1MB
+```
+
+Makes an ext4, XFS or HFS+ volume a read-only Windows drive, so Explorer and
+every other program can open it. Ctrl-C unmounts.
+
+This needs **WinFsp** (`winget install WinFsp.WinFsp`), the only dependency
+here that does not ship with Windows. It is loaded at runtime rather than
+linked, so every other command works without it and building bulkhead needs no
+SDK. WinFsp is GPLv3 with an exception for free software, which bulkhead's MIT
+licence falls under; a proprietary fork would need a licence from its authors.
 
 ### Verified against the real thing
 

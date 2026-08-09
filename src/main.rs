@@ -16,6 +16,7 @@ mod scan;
 mod snap;
 mod util;
 mod vhdx;
+mod winfsp;
 mod xfs;
 
 use std::ffi::c_void;
@@ -965,6 +966,22 @@ impl<'a> Fs<'a> {
         }
     }
 
+    fn label(&self) -> String {
+        match self {
+            Fs::Ext(e) => e.label.clone(),
+            Fs::Xfs(x) => x.label.clone(),
+            Fs::Hfs(_) => String::new(),
+        }
+    }
+
+    fn total(&self) -> u64 {
+        match self {
+            Fs::Ext(e) => e.blocks * e.block_size,
+            Fs::Xfs(x) => x.blocks * x.blocksize,
+            Fs::Hfs(h) => h.blocks as u64 * h.block_size,
+        }
+    }
+
     fn size_of(&self, ino: u64) -> Res<u64> {
         match self {
             Fs::Ext(e) => e.size_of(ino),
@@ -1043,6 +1060,24 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         eprintln!("    bulkhead scan {target}");
     }
     Ok(())
+}
+
+/// A filesystem whose device handle has been given away, so it can live for
+/// as long as the process does.
+type FsHandle = Fs<'static>;
+
+/// Mount a filesystem Windows cannot read, as a drive.
+fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str) -> Res<()> {
+    let (disk, base, name) = open_target(target, at)?;
+    // Leak the device handle so the filesystem outlives this frame. The mount
+    // serves until the process is interrupted, so one handle is a small price
+    // for not building a self-referential struct.
+    let disk: &'static Raw = Box::leak(Box::new(disk));
+    let fs = Fs::open(disk, base)?;
+    eprintln!("[*] {name} at {}: {}", human(base), fs.describe());
+    let (label, total) = (fs.label(), fs.total());
+    let label = if label.is_empty() { "bulkhead".into() } else { label };
+    winfsp::mount(fs, mount_point, &label, total)
 }
 
 /// List a directory on a filesystem Windows cannot read.
@@ -1413,6 +1448,10 @@ bulkhead -- block-level backup and recovery for Windows
       Say what a disk is and what set it belongs to -- RAID member, LVM
       or ZFS pool member, btrfs/bcachefs, SquashFS, UFS2, VMFS.
 
+  bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
+      Mount an ext2/3/4, XFS or HFS+ volume as a Windows drive, read-only.
+      Needs WinFsp (winget install WinFsp.WinFsp).
+
   bulkhead gui
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
@@ -1452,6 +1491,7 @@ fn main() {
         ["media", iso] => media::build(iso),
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
+        ["mount-fs", t, mp] => cmd_mount_fs(t, opt("--at").and_then(parse_size), mp),
         ["ls", t] => cmd_ls(t, opt("--at").and_then(parse_size), "/"),
         ["ls", t, path] => cmd_ls(t, opt("--at").and_then(parse_size), path),
         ["cp", t, path] => match opt("--to") {
