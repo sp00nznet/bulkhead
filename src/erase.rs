@@ -12,8 +12,8 @@ use std::mem::size_of;
 
 use windows::Win32::Storage::IscsiDisc::{ATA_PASS_THROUGH_DIRECT, IOCTL_ATA_PASS_THROUGH_DIRECT};
 use windows::Win32::System::Ioctl::{
-    STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_COMMAND, STORAGE_PROTOCOL_TYPE,
-    IOCTL_STORAGE_PROTOCOL_COMMAND, IOCTL_STORAGE_QUERY_PROPERTY,
+    STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR, STORAGE_PROTOCOL_SPECIFIC_DATA,
+    STORAGE_PROTOCOL_TYPE, IOCTL_STORAGE_QUERY_PROPERTY,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -245,57 +245,56 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
 }
 
 /// NVMe Identify Controller, for the format and sanitize capability words.
+///
+/// Through IOCTL_STORAGE_QUERY_PROPERTY rather than a pass-through command.
+/// Windows restricts which NVMe admin commands a pass-through may carry, but
+/// it will hand over Identify data on request -- that is what this query is
+/// for, and it is the supported way to ask.
 fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
-    /// The structure version, which is 1 -- not the size of anything. Passing
-    /// a size here is rejected outright.
-    const STRUCTURE_VERSION: u32 = 1;
-    /// Says the 64 bytes of command are an admin command rather than an I/O
-    /// one. Without it the request is malformed.
-    const NVME_ADMIN_COMMAND: u32 = 0x01;
-    const ADAPTER_REQUEST: u32 = 0x8000_0000;
-    const CMD: usize = 64;
-    const ERR: usize = 64;
+    const IDENTIFY_CONTROLLER: u32 = 1; // CNS value
     const DATA: usize = 4096;
 
-    // Everything is placed by offsets measured from the start of the header to
-    // its Command field -- not from the struct's size, which has tail padding.
-    let head = std::mem::offset_of!(STORAGE_PROTOCOL_COMMAND, Command);
-    let err_at = head + CMD;
-    let data_at = err_at + ERR;
-    let mut buf = vec![0u8; data_at + DATA];
+    let head = size_of::<STORAGE_PROPERTY_QUERY>() - 1 // AdditionalParameters[1]
+        + size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>();
+    let mut buf = vec![0u8; head + DATA + 1024];
 
     unsafe {
-        let c = buf.as_mut_ptr() as *mut STORAGE_PROTOCOL_COMMAND;
-        (*c).Version = STRUCTURE_VERSION;
-        (*c).Length = size_of::<STORAGE_PROTOCOL_COMMAND>() as u32;
-        (*c).ProtocolType = STORAGE_PROTOCOL_TYPE(3); // ProtocolTypeNvme
-        (*c).Flags = ADAPTER_REQUEST;
-        (*c).CommandLength = CMD as u32;
-        (*c).ErrorInfoLength = ERR as u32;
-        (*c).ErrorInfoOffset = err_at as u32;
-        (*c).DataFromDeviceTransferLength = DATA as u32;
-        (*c).DataFromDeviceBufferOffset = data_at as u32;
-        (*c).CommandSpecific = NVME_ADMIN_COMMAND;
-        (*c).TimeOutValue = 10;
+        let q = buf.as_mut_ptr() as *mut STORAGE_PROPERTY_QUERY;
+        (*q).PropertyId = windows::Win32::System::Ioctl::StorageAdapterProtocolSpecificProperty;
+        (*q).QueryType = windows::Win32::System::Ioctl::PropertyStandardQuery;
+        // The protocol request rides in AdditionalParameters.
+        let p = (&mut (*q).AdditionalParameters) as *mut _ as *mut STORAGE_PROTOCOL_SPECIFIC_DATA;
+        (*p).ProtocolType = STORAGE_PROTOCOL_TYPE(3); // ProtocolTypeNvme
+        (*p).DataType = windows::Win32::System::Ioctl::NVMeDataTypeIdentify.0 as u32;
+        (*p).ProtocolDataRequestValue = IDENTIFY_CONTROLLER;
+        (*p).ProtocolDataRequestSubValue = 0;
+        (*p).ProtocolDataOffset = size_of::<STORAGE_PROTOCOL_DATA_DESCRIPTOR>() as u32;
+        (*p).ProtocolDataLength = DATA as u32;
     }
-    // NVMe command: opcode 0x06 (Identify), CDW10 = 1 (Identify Controller).
-    buf[head] = 0x06;
-    buf[head + 40..head + 44].copy_from_slice(&1u32.to_le_bytes());
 
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_STORAGE_PROTOCOL_COMMAND,
-            Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
+            disk.0, IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(buf.as_ptr() as *const c_void), buf.len() as u32,
             Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
             Some(&mut ret), None,
-        ).ctx("NVMe Identify Controller")?;
+        ).ctx("NVMe Identify via StorageAdapterProtocolSpecificProperty")?;
     }
 
-    let id = &buf[data_at..];
-    if id.iter().all(|&b| b == 0) {
+    // The reply is a descriptor whose ProtocolSpecificData says where the
+    // payload landed.
+    let (off, len) = unsafe {
+        let d = buf.as_ptr() as *const STORAGE_PROTOCOL_DATA_DESCRIPTOR;
+        ((*d).ProtocolSpecificData.ProtocolDataOffset as usize,
+         (*d).ProtocolSpecificData.ProtocolDataLength as usize)
+    };
+    let id = buf.get(off..off + len.min(DATA))
+        .ok_or("Identify payload landed outside the buffer")?;
+    if id.len() < 532 || id.iter().all(|&b| b == 0) {
         return Err("Identify Controller returned nothing".into());
     }
+
     if caps.model.is_empty() {
         caps.serial = String::from_utf8_lossy(&id[4..24]).trim().to_string();
         caps.model = String::from_utf8_lossy(&id[24..64]).trim().to_string();
