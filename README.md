@@ -126,6 +126,8 @@ stranded behind a partition table describing the old disk.
       read and never written
 - [x] `restore` — erase a disk and write an image back, GPT relocated if the
       target is bigger. Refuses the disk hosting the running system
+- [x] `scan` / `scan --rebuild` — find filesystems whose partition table is
+      gone and write a new GPT pointing at them
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
@@ -144,8 +146,8 @@ The five things people currently pay for. Each one builds on the last:
    nobody gives away; see below for what is deliberately left to Windows.
    Outstanding: MBR disks are rejected outright.
 3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
-   table is gone and rebuilds it. Outstanding: undelete, file carving, and the
-   GUI itself.
+   table is gone and rebuilds it, which is TestDisk's headline feature.
+   Outstanding: undelete, file carving, and the GUI itself.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
    anyway; exposing it as a mountable volume (WinFsp) is nearly free once the
    parser exists.
