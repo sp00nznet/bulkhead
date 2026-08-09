@@ -384,6 +384,13 @@ carries its RAID metadata on the partition rather than the disk.
 different ones are out of sync, and assembling them in the wrong order is how a
 recoverable array becomes an unrecoverable one.
 
+**Two things can claim the same disk, and only one of them is current.** A
+drive that was a ZFS member and has since been reformatted still carries its
+vdev labels at the far end, where nothing has written. So `identify` reports
+*which* of ZFS's four labels survive: front labels gone and end labels intact
+means the pool membership is history, not news. It reports everything it finds
+and tells you what the evidence is — it does not pick a winner for you.
+
 These are identification only. ZFS, VMFS and SquashFS are not read by bulkhead
 — SquashFS contents are always compressed, and the other two are large projects
 in themselves. Assemble MD/LVM on Linux, import ZFS with `zpool`, and the

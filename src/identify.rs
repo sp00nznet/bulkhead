@@ -216,42 +216,68 @@ pub fn nvlist_pairs(b: &[u8]) -> Vec<(String, Nv)> {
 }
 
 fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
-    // Four identical labels: two at the front, two at the back. Any will do,
-    // and trying more than one survives a damaged front of disk.
-    let spots = [16 * 1024u64, 256 * 1024 + 16 * 1024,
-                 size.checked_sub(512 * 1024)? + 16 * 1024,
-                 size.checked_sub(256 * 1024)? + 16 * 1024];
-    for off in spots {
+    // Four identical labels: two at the front, two at the back. Which ones
+    // survive is evidence in itself -- see below.
+    let spots = [
+        (16 * 1024u64, "L0", true),
+        (256 * 1024 + 16 * 1024, "L1", true),
+        (size.checked_sub(512 * 1024)? + 16 * 1024, "L2", false),
+        (size.checked_sub(256 * 1024)? + 16 * 1024, "L3", false),
+    ];
+
+    let mut found: Option<Vec<(String, Nv)>> = None;
+    let mut labels = Vec::new();
+    let mut front = 0;
+    for (off, name, is_front) in spots {
         let Some(b) = read_at(disk, base, off, 112 * 1024) else { continue };
         let pairs = nvlist_pairs(&b);
-        let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-        let Some(Nv::Str(name)) = get("name") else { continue };
-
-        let mut lines = vec![format!("pool {name:?}")];
-        if let Some(Nv::U64(g)) = get("pool_guid") {
-            lines.push(format!("pool GUID {g:#x}"));
+        if !pairs.iter().any(|(n, v)| n == "name" && matches!(v, Nv::Str(_))) {
+            continue;
         }
-        if let Some(Nv::U64(g)) = get("guid") {
-            lines.push(format!("this device GUID {g:#x}"));
+        labels.push(name);
+        if is_front {
+            front += 1;
         }
-        if let Some(Nv::U64(s)) = get("state") {
-            lines.push(format!("state {}", match s {
-                0 => "active".into(),
-                1 => "exported".into(),
-                2 => "destroyed".into(),
-                n => format!("{n}"),
-            }));
+        if found.is_none() {
+            found = Some(pairs);
         }
-        if let Some(Nv::U64(t)) = get("txg") {
-            lines.push(format!("txg {t} -- members with different txgs are out of sync"));
-        }
-        if let Some(Nv::Str(h)) = get("hostname") {
-            lines.push(format!("last used by host {h:?}"));
-        }
-        lines.push("import with zpool on a system that speaks ZFS; bulkhead does not read it".into());
-        return Some(Report { kind: "ZFS pool member", lines });
     }
-    None
+    let pairs = found?;
+    let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    let Some(Nv::Str(name)) = get("name") else { return None };
+
+    let mut lines = vec![format!("pool {name:?}")];
+    if let Some(Nv::U64(g)) = get("pool_guid") {
+        lines.push(format!("pool GUID {g:#x}"));
+    }
+    if let Some(Nv::U64(g)) = get("guid") {
+        lines.push(format!("this device GUID {g:#x}"));
+    }
+    if let Some(Nv::U64(s)) = get("state") {
+        lines.push(format!("state {}", match s {
+            0 => "active".into(),
+            1 => "exported".into(),
+            2 => "destroyed".into(),
+            n => format!("{n}"),
+        }));
+    }
+    if let Some(Nv::U64(t)) = get("txg") {
+        lines.push(format!("txg {t} -- members with different txgs are out of sync"));
+    }
+    if let Some(Nv::Str(h)) = get("hostname") {
+        lines.push(format!("last used by host {h:?}"));
+    }
+
+    // ZFS writes four copies precisely so losing one end is survivable. Which
+    // ones are left says what happened to the disk since: anything that
+    // reformats writes over the front and rarely touches the last megabyte, so
+    // labels surviving only at the end mean this membership is history.
+    lines.push(format!("labels present: {} of 4 ({})", labels.len(), labels.join(", ")));
+    if front == 0 {
+        lines.push("ONLY the end-of-disk labels survive -- the front has been                     overwritten since, so this pool membership is probably stale".into());
+    }
+    lines.push("import with zpool on a system that speaks ZFS; bulkhead does not read it".into());
+    Some(Report { kind: "ZFS pool member", lines })
 }
 
 // --- btrfs ------------------------------------------------------------------

@@ -985,8 +985,10 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
 
     let mut found = 0;
     for (off, what, len) in spots {
-        let reports = identify::identify(&disk, off, size.saturating_sub(off))
-            .unwrap_or_default();
+        // Probes that look at both ends of a thing need its length, not the
+        // rest of the disk.
+        let span = if len > 0 { len } else { size.saturating_sub(off) };
+        let reports = identify::identify(&disk, off, span).unwrap_or_default();
         let fs = Fs::open(&disk, off).ok();
 
         // Whole-device silence is normal on a partitioned disk; a partition
