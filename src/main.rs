@@ -4,6 +4,7 @@
 //! Windows already mounts one as a drive, already does differencing chains for
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
+mod carve;
 mod gpt;
 mod media;
 mod ntfs;
@@ -831,6 +832,24 @@ fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) -> R
     Ok(())
 }
 
+/// Carve files out of raw bytes, for when no filesystem survives.
+fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
+    let path = match disk_arg(target) {
+        Some(n) => format!(r"\\.\PhysicalDrive{n}"),
+        None => format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":",
+    };
+    let disk = Raw::open(&path, false).ctx("open source")?;
+    let size = disk.len()?;
+    eprintln!("[*] carving {path} ({})", human(size));
+    let n = carve::carve(&disk, size, std::path::Path::new(out_dir), limit)?;
+    eprintln!("[+] {n} file(s) written to {out_dir}");
+    if n > 0 {
+        eprintln!("    Carved files have no names and are one contiguous stretch each,");
+        eprintln!("    so anything the filesystem fragmented comes back truncated.");
+    }
+    Ok(())
+}
+
 /// A fresh GUID for a disk or partition, in the byte order GPT stores.
 fn new_guid() -> Res<[u8; 16]> {
     let g = windows::core::GUID::new()?;
@@ -1106,6 +1125,10 @@ bulkhead -- block-level backup and recovery for Windows
       Recover deleted files from an NTFS volume. Read-only on the source.
       --at gives the volume's byte offset when the target is a whole disk.
 
+  bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
+      Last resort: pull files out by their signatures when no filesystem
+      survives. No names, and fragmented files come back truncated.
+
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
@@ -1139,6 +1162,11 @@ fn main() {
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
+        ["carve", t] => match opt("--to") {
+            Some(dir) => cmd_carve(t, dir,
+                                   opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(5_000)),
+            None => Err("carve needs --to <DIR>".into()),
+        },
         ["undo", d, file] => disk_arg(d)
             .ok_or_else(|| format!("{d:?} is not a disk").into())
             .and_then(|n| cmd_undo(n, file, flag("--yes"))),

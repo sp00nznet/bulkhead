@@ -55,6 +55,7 @@ bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
 bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead undo <diskN> <TABLE.bin> [--yes]
 bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
+bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead media <OUT.iso>
 ```
 
@@ -132,6 +133,7 @@ stranded behind a partition table describing the old disk.
       gone and write a new GPT pointing at them
 - [x] `undelete` — recover deleted files from NTFS, resident and non-resident
 - [x] `undo` — put back a table saved by `scan --rebuild`
+- [x] `carve` — signature-based recovery when no filesystem survives
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
@@ -151,7 +153,8 @@ The five things people currently pay for. Each one builds on the last:
    Outstanding: MBR disks are rejected outright.
 3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
    table is gone and rebuilds it, which is TestDisk's headline feature.
-   Outstanding: undelete, file carving, and the GUI itself.
+   `undelete` recovers files from a surviving MFT and `carve` works from raw
+   signatures when there is none. Outstanding: the GUI itself.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
    anyway; exposing it as a mountable volume (WinFsp) is nearly free once the
    parser exists.
@@ -279,6 +282,23 @@ record has been reused is gone for good. A file that cannot be fully read is
 reported as PARTIAL with the amount that was readable, never padded out to its
 recorded length — a correctly-sized file of zeros looks like a success and is
 the worst thing a recovery tool can hand back.
+
+## Carving: the last resort
+
+```powershell
+bulkhead carve disk2 --to C:\carved
+```
+
+When the MFT is gone there are no names, no sizes and no maps — only bytes.
+Most formats announce themselves with a magic number and many mark their own
+end, so a file can be lifted out whole without knowing anything about the
+filesystem that held it. Fourteen signatures: JPEG, PNG, GIF, PDF, zip (which
+covers Office and OpenDocument), MP4, SQLite, 7z, RAR, MP3, Ogg, gzip, bzip2.
+
+Two things it cannot do. Carved files have **no names** — only the offset they
+came from. And each is one contiguous stretch, so anything the filesystem
+**fragmented** comes back truncated at the first gap. Use `undelete` whenever
+the MFT survives; carve only when it does not.
 
 ## Design notes
 

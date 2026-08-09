@@ -341,6 +341,42 @@ try {
     }
 
     Write-Host "`nPASS  deleted file recovered byte-for-byte" -ForegroundColor Green
+
+    # --- carving -----------------------------------------------------------
+    # A synthetic JPEG: real magic, real footer, and a payload that cannot
+    # contain the footer by accident (never emits 0xFF). Carving finds it by
+    # its signature alone, with no help from the filesystem.
+    $body = [byte[]](1..4000 | ForEach-Object { $_ % 251 })
+    $jpg  = [byte[]]@(0xFF, 0xD8, 0xFF, 0xE0) + $body + [byte[]]@(0xFF, 0xD9)
+    $jpgPath = "$vol\photo.jpg"
+    [IO.File]::WriteAllBytes($jpgPath, $jpg)
+    $jpgHash = (Get-FileHash $jpgPath).Hash
+    Write-VolumeCache -DriveLetter $rec.DriveLetter
+    Start-Sleep -Seconds 2
+    Remove-Item $jpgPath -Force
+    Write-VolumeCache -DriveLetter $rec.DriveLetter
+    Start-Sleep -Seconds 2
+
+    $carved = Join-Path $work 'carved'
+    Write-Host "`n[*] bulkhead carve $vol --to $carved"
+    & $exe carve $vol --to $carved --limit 200
+    if ($LASTEXITCODE -ne 0) { throw "carve failed" }
+
+    $shot = Get-ChildItem $carved -Filter *.jpg -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -eq $jpg.Length } | Select-Object -First 1
+    if (-not $shot) {
+        Write-Host "--- carved files ---"
+        Get-ChildItem $carved -ErrorAction SilentlyContinue |
+            Format-Table Name, Length -AutoSize | Out-String | Write-Host
+        throw "FAIL  no carved jpg of $($jpg.Length) bytes"
+    }
+    $shotHash = (Get-FileHash $shot.FullName).Hash
+    Write-Host "[*] original $jpgHash"
+    Write-Host "[*] carved   $shotHash  ($($shot.Name))"
+    if ($shotHash -ne $jpgHash) { throw "FAIL  carved bytes differ" }
+
+    Write-Host "`nPASS  file carved from raw bytes by signature" -ForegroundColor Green
+    Write-Host "`nALL STAGES PASSED" -ForegroundColor Green
 }
 finally {
     Detach-All
