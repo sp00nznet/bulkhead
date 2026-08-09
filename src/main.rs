@@ -86,14 +86,23 @@ impl Raw {
     fn len(&self) -> Res<u64> {
         let mut li = GET_LENGTH_INFORMATION::default();
         let mut ret = 0u32;
-        unsafe {
+        let ioctl = unsafe {
             DeviceIoControl(
                 self.0, IOCTL_DISK_GET_LENGTH_INFO, None, 0,
                 Some(&mut li as *mut _ as *mut c_void),
                 size_of::<GET_LENGTH_INFORMATION>() as u32, Some(&mut ret), None,
-            ).ctx("IOCTL_DISK_GET_LENGTH_INFO")?;
+            )
+        };
+        if ioctl.is_ok() {
+            return Ok(li.Length as u64);
         }
-        Ok(li.Length as u64)
+        // A regular file does not answer disk ioctls; ask for its size instead.
+        let mut size = 0i64;
+        unsafe {
+            windows::Win32::Storage::FileSystem::GetFileSizeEx(self.0, &mut size)
+                .ctx("length of target")?;
+        }
+        Ok(size as u64)
     }
 
     /// Logical bytes-per-sector. A whole-disk image must declare the source's
@@ -860,7 +869,14 @@ fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
 }
 
 /// Open a target as a raw device plus a byte offset into it.
+///
+/// A plain file works too, which is how these get tested against filesystem
+/// images without needing the media.
 fn open_target(target: &str, at: Option<u64>) -> Res<(Raw, u64, String)> {
+    if std::path::Path::new(target).is_file() {
+        let d = Raw::open(target, false).ctx("open image file")?;
+        return Ok((d, at.unwrap_or(0), target.to_string()));
+    }
     match disk_arg(target) {
         Some(n) => {
             let p = format!(r"\\.\PhysicalDrive{n}");
@@ -912,12 +928,13 @@ impl<'a> Fs<'a> {
 
     fn describe(&self) -> String {
         match self {
-            Fs::Ext(e) => format!("ext2/3/4, {}-byte blocks{}", e.block_size,
+            Fs::Ext(e) => format!("ext2/3/4, {}{}", human(e.blocks * e.block_size),
                 if e.label.is_empty() { String::new() } else { format!(", label {:?}", e.label) }),
-            Fs::Xfs(x) => format!("XFS, {}-byte blocks{}", x.blocksize,
+            Fs::Xfs(x) => format!("XFS, {}{}", human(x.blocks * x.blocksize),
                 if x.label.is_empty() { String::new() } else { format!(", label {:?}", x.label) }),
-            Fs::Hfs(h) => format!("HFS+{}, {}-byte blocks",
-                if h.case_sensitive { "X (case-sensitive)" } else { "" }, h.block_size),
+            Fs::Hfs(h) => format!("HFS+{}, {}",
+                if h.case_sensitive { "X (case-sensitive)" } else { "" },
+                human(h.blocks as u64 * h.block_size)),
         }
     }
 

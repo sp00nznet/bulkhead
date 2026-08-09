@@ -287,7 +287,7 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
         lines.push(format!("{why}"));
         lines.push("treat this as a former membership unless zpool says otherwise".into());
     }
-    lines.push("the fields above are what the label recorded when it was last written,                 not the state now".into());
+    lines.push("these fields are what the label recorded when last written, not now".into());
     lines.push("import with zpool on a system that speaks ZFS; bulkhead does not read it".into());
     Some(Report { kind: "ZFS pool member", lines })
 }

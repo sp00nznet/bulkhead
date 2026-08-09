@@ -246,9 +246,22 @@ impl<'a> Xfs<'a> {
         Ok(raw)
     }
 
-    /// Where a fork's data starts inside the inode: v3 cores are larger.
+    /// Where a fork's data starts inside the inode. A v3 core is 176 bytes; a
+    /// v2 one ends after di_next_unlinked at 0x64, so 100 -- not 96.
     fn fork_offset(ino: &[u8]) -> usize {
-        if ino[4] >= 3 { 176 } else { 96 }
+        if ino[4] >= 3 { 176 } else { 100 }
+    }
+
+    /// Where the data fork ends. di_forkoff counts 8-byte units from the start
+    /// of the fork area to the attribute fork; zero means there is no
+    /// attribute fork and the data fork runs to the end of the inode.
+    fn data_fork_end(ino: &[u8]) -> usize {
+        let forkoff = ino[0x52] as usize * 8;
+        if forkoff > 0 {
+            (Self::fork_offset(ino) + forkoff).min(ino.len())
+        } else {
+            ino.len()
+        }
     }
 
     fn extents_of(&self, ino: &[u8]) -> Res<Vec<Extent>> {
@@ -259,14 +272,25 @@ impl<'a> Xfs<'a> {
                              this file or directory is too large or too fragmented"
                 .into()),
         }
-        let n = b32(ino, 0x4C) as usize;
+        // Read records until they run out rather than trusting a count.
+        // di_nextents used to sit at 0x4c, but the NREXT64 feature -- on by
+        // default in current mkfs.xfs -- moves it, and reading the old offset
+        // yields zero, which silently produces an empty file. The fork's own
+        // extent is the reliable bound: records are 16 bytes, and an unused
+        // slot is all zeros.
         let base = Self::fork_offset(ino);
+        let end = Self::data_fork_end(ino);
         let mut v = Vec::new();
-        for i in 0..n {
-            let Some(rec) = ino.get(base + i * 16..base + i * 16 + 16) else { break };
+        let mut at = base;
+        while at + 16 <= end {
+            let rec = &ino[at..at + 16];
+            if rec.iter().all(|&b| b == 0) {
+                break;
+            }
             if let Some(e) = decode_extent(rec) {
                 v.push(e);
             }
+            at += 16;
         }
         v.sort_by_key(|e| e.logical);
         Ok(v)

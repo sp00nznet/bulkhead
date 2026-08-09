@@ -353,6 +353,28 @@ volumes predating extents (indirect block maps), XFS files large enough to need
 b-tree forks, HFS+ forks continuing into the extents overflow file, and old HFS
 volumes with HFS+ embedded inside them. APFS and btrfs are next.
 
+### Verified against the real thing
+
+`fs-smoke.ps1` builds images with `mkfs` inside WSL, fills them with known
+content, records the hashes, then reads them back with bulkhead and compares.
+Unit tests only prove the parsing agrees with itself; this proves it agrees
+with the filesystem's own implementation, which is the only opinion that
+counts.
+
+| | |
+|---|---|
+| ext4 | **pass** — text, a 300 KB binary spanning extents, a nested file |
+| XFS | **pass** — same three |
+| ext2 | **refused correctly** — no extents, so it declines rather than guessing |
+| F2FS, HFS+ | skipped: the WSL kernel cannot mount them, so no image can be filled |
+
+It found a real bug. XFS listed directories and reported correct file sizes but
+returned every file **empty** — the `NREXT64` feature, on by default in current
+`mkfs.xfs`, moves `di_nextents`, and reading the old offset gives zero. Extents
+are now bounded by the fork itself rather than by a count field that moves
+between versions. No unit test would have caught it: it was written against the
+same wrong assumption as the code.
+
 ## What is this disk?
 
 ```powershell
