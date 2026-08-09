@@ -364,6 +364,11 @@ bulkhead mount-fs disk2 X: --at 1MB
 Makes an ext4, XFS or HFS+ volume a read-only Windows drive, so Explorer and
 every other program can open it. Ctrl-C unmounts.
 
+A read-only filesystem still has to supply `Create` and `Overwrite`: WinFsp
+checks that all of Create, Open and Overwrite exist before dispatching *any*
+create, including opening an existing file for reading. Both answer
+`STATUS_MEDIA_WRITE_PROTECTED`.
+
 This needs **WinFsp** (`winget install WinFsp.WinFsp`), the only dependency
 here that does not ship with Windows. It is loaded at runtime rather than
 linked, so every other command works without it and building bulkhead needs no
@@ -381,7 +386,9 @@ counts.
 | | |
 |---|---|
 | ext4 | **pass** — text, a 300 KB binary spanning extents, a nested file |
+| ext4 via a mounted drive | **pass** — the same three, read back through `X:` |
 | XFS | **pass** — same three |
+| XFS via a mounted drive | **pass** |
 | ext2 | **refused correctly** — no extents, so it declines rather than guessing |
 | F2FS, HFS+ | skipped: the WSL kernel cannot mount them, so no image can be filled |
 

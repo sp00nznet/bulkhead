@@ -115,6 +115,42 @@ umount /tmp/bhmnt
     }
     $script:results += [pscustomobject]@{ Name = $name; Result = if ($bad) { "$bad wrong" } else { 'pass' } }
     if ($bad) { throw "${name}: ${bad} file(s) did not match" }
+
+    # And again through a real drive letter, if WinFsp is installed. Reading
+    # the same bytes back through Explorer's own path is the only proof the
+    # filesystem driver side works.
+    if (-not (Test-Path 'C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll')) {
+        Write-Host "  (mount check skipped: WinFsp not installed)" -ForegroundColor DarkGray
+        return
+    }
+    $letter = 'X:'
+    $proc = Start-Process $exe -ArgumentList @('mount-fs', $local, $letter) `
+                          -PassThru -WindowStyle Hidden
+    try {
+        for ($i = 0; $i -lt 15 -and -not (Test-Path "$letter\hello.txt"); $i++) {
+            Start-Sleep -Seconds 1
+        }
+        if (-not (Test-Path "$letter\hello.txt")) { throw "${name}: mount produced no drive" }
+        $mbad = 0
+        foreach ($k in $want.Keys) {
+            # Join-Path rather than string concatenation: the separator has
+            # been mangled by escaping twice already.
+            $path = Join-Path "$letter\" ($k -replace '/', [char]92)
+            if (-not (Test-Path $path)) { Write-Host "  MOUNT MISSING $k" -ForegroundColor Red; $mbad++; continue }
+            $h = (Get-FileHash $path -Algorithm MD5).Hash.ToLower()
+            if ($h -ne $want[$k]) {
+                Write-Host "  MOUNT MISMATCH $k`n    want $($want[$k])`n    got  $h" -ForegroundColor Red
+                $mbad++
+            } else {
+                Write-Host "  ok (mounted) $k" -ForegroundColor Green
+            }
+        }
+        if ($mbad) { throw "${name}: ${mbad} file(s) wrong through the mount" }
+        $script:results += [pscustomobject]@{ Name = "$name via drive"; Result = 'pass' }
+    } finally {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
 }
 
 Test-Filesystem 'ext4' 'mkfs.ext4'     '-q -L BULKTEST -F' 64  'ext4'

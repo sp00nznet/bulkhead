@@ -1067,7 +1067,7 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
 type FsHandle = Fs<'static>;
 
 /// Mount a filesystem Windows cannot read, as a drive.
-fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str) -> Res<()> {
+fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str, debug: bool) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
     // Leak the device handle so the filesystem outlives this frame. The mount
     // serves until the process is interrupted, so one handle is a small price
@@ -1077,7 +1077,7 @@ fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str) -> Res<()> {
     eprintln!("[*] {name} at {}: {}", human(base), fs.describe());
     let (label, total) = (fs.label(), fs.total());
     let label = if label.is_empty() { "bulkhead".into() } else { label };
-    winfsp::mount(fs, mount_point, &label, total)
+    winfsp::mount(fs, mount_point, &label, total, debug)
 }
 
 /// List a directory on a filesystem Windows cannot read.
@@ -1491,7 +1491,9 @@ fn main() {
         ["media", iso] => media::build(iso),
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
-        ["mount-fs", t, mp] => cmd_mount_fs(t, opt("--at").and_then(parse_size), mp),
+        ["mount-fs", t, mp] => {
+            cmd_mount_fs(t, opt("--at").and_then(parse_size), mp, flag("--debug"))
+        }
         ["ls", t] => cmd_ls(t, opt("--at").and_then(parse_size), "/"),
         ["ls", t, path] => cmd_ls(t, opt("--at").and_then(parse_size), path),
         ["cp", t, path] => match opt("--to") {

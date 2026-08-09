@@ -7,12 +7,17 @@
 //! WinFsp itself is GPLv3 with an exception for free software; bulkhead is
 //! MIT, which that exception covers. A proprietary fork would need a licence
 //! from its authors.
+// Every function below is an FFI callback whose whole body works on raw
+// pointers handed over by the driver. Marking each operation individually adds
+// noise without adding information.
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HMODULE, STATUS_ACCESS_DENIED, STATUS_END_OF_FILE,
                                  STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -74,13 +79,6 @@ struct FileInfo {
 }
 
 #[repr(C)]
-struct OpenFileInfo {
-    file_info: FileInfo,
-    normalized_name: PWSTR,
-    normalized_name_size: u16,
-}
-
-#[repr(C)]
 struct VolumeInfo {
     total_size: u64,
     free_size: u64,
@@ -94,6 +92,9 @@ impl Default for VolumeInfo {
     }
 }
 
+/// The volume is read-only; every write path answers with this.
+const STATUS_MEDIA_WRITE_PROTECTED: i32 = 0xC000_00A2u32 as i32;
+
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
 
@@ -106,12 +107,17 @@ struct Interface {
     get_security_by_name: Option<
         unsafe extern "system" fn(*mut c_void, PCWSTR, *mut u32, *mut c_void, *mut u64) -> i32,
     >,
-    create: *const c_void,
+    create: Option<
+        unsafe extern "system" fn(*mut c_void, PCWSTR, u32, u32, u32, *mut c_void, u64,
+                                  *mut *mut c_void, *mut FileInfo) -> i32,
+    >,
     open: Option<
         unsafe extern "system" fn(*mut c_void, PCWSTR, u32, u32, *mut *mut c_void, *mut FileInfo)
             -> i32,
     >,
-    overwrite: *const c_void,
+    overwrite: Option<
+        unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u8, u64, *mut FileInfo) -> i32,
+    >,
     cleanup: *const c_void,
     close: Option<unsafe extern "system" fn(*mut c_void, *mut c_void)>,
     read: Option<
@@ -174,6 +180,8 @@ type FspStartDispatcher = unsafe extern "system" fn(*mut c_void, u32) -> i32;
 type FspStopDispatcher = unsafe extern "system" fn(*mut c_void);
 type FspDelete = unsafe extern "system" fn(*mut c_void);
 type FspAddDirInfo = unsafe extern "system" fn(*mut DirInfo, *mut c_void, u32, *mut u32) -> u8;
+type FspSetDebugLog = unsafe extern "system" fn(*mut c_void, u32);
+type FspDebugLogSetHandle = unsafe extern "system" fn(isize);
 
 struct Api {
     create: FspCreate,
@@ -182,6 +190,9 @@ struct Api {
     stop_dispatcher: FspStopDispatcher,
     delete: FspDelete,
     add_dir_info: FspAddDirInfo,
+    /// Optional: only used by --debug, and absent from some builds.
+    set_debug_log: Option<FspSetDebugLog>,
+    debug_log_set_handle: Option<FspDebugLogSetHandle>,
 }
 
 unsafe fn sym(m: HMODULE, name: &str) -> Res<*const c_void> {
@@ -210,6 +221,12 @@ fn load() -> Res<Api> {
                 sym(m, "FspFileSystemDelete")?),
             add_dir_info: std::mem::transmute::<*const c_void, FspAddDirInfo>(
                 sym(m, "FspFileSystemAddDirInfo")?),
+            // SetDebugLog is an inline helper in the header; the exported one
+            // is SetDebugLogF. Neither is required to mount.
+            set_debug_log: sym(m, "FspFileSystemSetDebugLogF").ok()
+                .map(|f| std::mem::transmute::<*const c_void, FspSetDebugLog>(f)),
+            debug_log_set_handle: sym(m, "FspDebugLogSetHandle").ok()
+                .map(|f| std::mem::transmute::<*const c_void, FspDebugLogSetHandle>(f)),
         })
     }
 }
@@ -274,6 +291,24 @@ fn resolve(m: &Mount, path: &str) -> Option<Node> {
     let (id, is_dir) = m.fs.resolve(path).ok()?;
     let size = if is_dir { 0 } else { m.fs.size_of(id).unwrap_or(0) };
     Some(Node { id, is_dir, size })
+}
+
+/// WinFsp rejects the whole create path unless Create and Overwrite exist,
+/// even for opening a file read-only -- it checks all three up front. So a
+/// read-only filesystem still has to answer them, and the honest answer is
+/// that the volume is write protected.
+unsafe extern "system" fn cb_create(
+    _fs: *mut c_void, _name: PCWSTR, _opts: u32, _access: u32, _attrs: u32,
+    _sd: *mut c_void, _alloc: u64, _context: *mut *mut c_void, _info: *mut FileInfo,
+) -> i32 {
+    STATUS_MEDIA_WRITE_PROTECTED
+}
+
+unsafe extern "system" fn cb_overwrite(
+    _fs: *mut c_void, _context: *mut c_void, _attrs: u32, _replace: u8,
+    _alloc: u64, _info: *mut FileInfo,
+) -> i32 {
+    STATUS_MEDIA_WRITE_PROTECTED
 }
 
 unsafe extern "system" fn cb_get_volume_info(_fs: *mut c_void, out: *mut VolumeInfo) -> i32 {
@@ -429,7 +464,8 @@ unsafe extern "system" fn on_ctrl_c(_kind: u32) -> windows::core::BOOL {
 }
 
 /// Mount a filesystem at a drive letter or directory, until interrupted.
-pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64) -> Res<()> {
+pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64,
+             debug: bool) -> Res<()> {
     let api = load()?;
 
     *MOUNT.lock().unwrap() = Some(Mount {
@@ -441,7 +477,10 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64) ->
     });
 
     let mut params = VolumeParams {
-        version: std::mem::size_of::<VolumeParams>() as u16,
+        // 0 means "the V0 fields only", which is exactly what this struct is.
+        // The alternative is the size of the full V1 structure; giving the V0
+        // size is neither, and WinFsp then reads past the end of it.
+        version: 0,
         sector_size: 512,
         sectors_per_allocation_unit: 1,
         max_component_length: 255,
@@ -461,7 +500,9 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64) ->
     let iface = Interface {
         get_volume_info: Some(cb_get_volume_info),
         get_security_by_name: Some(cb_get_security_by_name),
+        create: Some(cb_create),
         open: Some(cb_open),
+        overwrite: Some(cb_overwrite),
         close: Some(cb_close),
         read: Some(cb_read),
         get_file_info: Some(cb_get_file_info),
@@ -470,7 +511,9 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64) ->
     };
 
     let mut handle: *mut c_void = std::ptr::null_mut();
-    let device = wide(r"\Device\WinFsp.Disk");
+    // FSP_FSCTL_DISK_DEVICE_NAME: the product name plus ".Disk". Not a
+    // \Device\ path -- WinFsp builds that itself.
+    let device = wide("WinFsp.Disk");
     let st = unsafe { (api.create)(PCWSTR(device.as_ptr()), &params, &iface, &mut handle) };
     if st != 0 {
         return Err(format!("FspFileSystemCreate failed ({st:#x})").into());
@@ -483,6 +526,26 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64) ->
         return Err(format!(
             "could not mount at {mount_point} ({st:#x}) -- is the letter already in use?"
         ).into());
+    }
+
+    if debug {
+        // WinFsp names each operation and its result, which is the only way to
+        // see which one a filesystem is getting wrong.
+        unsafe {
+            let stderr = windows::Win32::System::Console::GetStdHandle(
+                windows::Win32::System::Console::STD_ERROR_HANDLE)
+                .map(|h| h.0 as isize).unwrap_or(0);
+            if let Some(f) = api.debug_log_set_handle {
+                f(stderr);
+            }
+            match api.set_debug_log {
+                Some(f) => {
+                    f(handle, u32::MAX);
+                    eprintln!("[*] WinFsp operation logging on");
+                }
+                None => eprintln!("[!] this WinFsp build exports no debug log"),
+            }
+        }
     }
 
     let st = unsafe { (api.start_dispatcher)(handle, 0) };
