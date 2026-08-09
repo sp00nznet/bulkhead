@@ -128,8 +128,12 @@ impl Caps {
             v.push("an ATA password is already set; it must be known to erase".into());
         }
         if !self.answered {
-            v.push("the drive did not answer a capability query, so nothing here is                     known either way. Its storage driver may not pass these through                     -- Intel RST and VMD commonly do not. Switching the controller to                     standard AHCI/NVMe, or attaching the drive elsewhere, makes it                     answerable."
-                .into());
+            // One line per sentence: a `\` continuation inside a string keeps
+            // whatever indentation follows it, and this message has already
+            // been printed with forty spaces in the middle of it once.
+            v.push("the drive did not answer a capability query, so nothing here is known either way".into());
+            v.push("  its storage driver may not pass these through; Intel RST and VMD commonly do not".into());
+            v.push("  switching the controller to standard AHCI/NVMe, or attaching the drive elsewhere, makes it answerable".into());
         } else if self.methods().is_empty() {
             v.push("this drive reports no usable erase command".into());
         }
