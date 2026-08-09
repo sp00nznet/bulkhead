@@ -100,25 +100,30 @@ fn enumerate() -> Vec<(String, String)> {
         .collect()
 }
 
-fn refresh(ui: &mut Ui) {
-    unsafe { SendMessageW(ui.list, LB_RESETCONTENT, None, None) };
-    ui.targets.clear();
+/// Repopulate the list and hand back the argument for each row.
+///
+/// Takes a handle rather than the `Ui`, so no borrow of the shared state is
+/// held while messaging controls -- see `wndproc`.
+fn refresh(list: HWND) -> Vec<String> {
+    unsafe { SendMessageW(list, LB_RESETCONTENT, None, None) };
+    let mut targets = Vec::new();
     for (arg, label) in enumerate() {
         let w = wide(&label);
         unsafe {
-            SendMessageW(ui.list, LB_ADDSTRING, Some(WPARAM(0)),
+            SendMessageW(list, LB_ADDSTRING, Some(WPARAM(0)),
                          Some(LPARAM(w.as_ptr() as isize)));
         }
-        ui.targets.push(arg);
+        targets.push(arg);
     }
+    targets
 }
 
-fn selected(ui: &Ui) -> Option<String> {
-    let i = unsafe { SendMessageW(ui.list, LB_GETCURSEL, None, None) }.0;
+fn selected(list: HWND, targets: &[String]) -> Option<String> {
+    let i = unsafe { SendMessageW(list, LB_GETCURSEL, None, None) }.0;
     if i < 0 {
         return None;
     }
-    ui.targets.get(i as usize).cloned()
+    targets.get(i as usize).cloned()
 }
 
 fn text_of(h: HWND) -> String {
@@ -175,74 +180,90 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     match msg {
         WM_COMMAND => {
             let id = (wp.0 & 0xFFFF) as usize;
-            UI.with(|u| {
-                let mut b = u.borrow_mut();
-                let Some(ui) = b.as_mut() else { return };
-                let (log, path) = (ui.log, ui.path);
-                let out = text_of(path);
-                let target = selected(ui);
+            let code = (wp.0 >> 16) & 0xFFFF;
+            // BN_CLICKED is 0. Edit and list boxes report through WM_COMMAND
+            // too -- EN_CHANGE, LBN_SELCHANGE -- and appending to the log makes
+            // the edit control notify this very window proc, re-entering it
+            // from inside our own SendMessage.
+            if code != 0 {
+                return LRESULT(0);
+            }
 
-                let need_target = |verb: &str| -> Option<String> {
-                    match &target {
-                        Some(t) => Some(t.clone()),
-                        None => {
-                            append(log, &format!("[!] pick a disk or volume to {verb}\r\n"));
-                            None
-                        }
-                    }
-                };
-                let need_path = |what: &str| -> bool {
-                    if out.trim().is_empty() {
-                        append(log, &format!("[!] fill in the output {what} first\r\n"));
-                        false
-                    } else {
-                        true
-                    }
-                };
-
-                match id {
-                    ID_REFRESH => refresh(ui),
-                    ID_SCAN => {
-                        if let Some(t) = need_target("scan") {
-                            run(log, vec!["scan".into(), t]);
-                        }
-                    }
-                    ID_IMAGE => {
-                        if let (Some(t), true) = (need_target("image"), need_path("file (.vhdx)")) {
-                            run(log, vec!["image".into(), t, out.clone()]);
-                        }
-                    }
-                    ID_UNDELETE => {
-                        if let (Some(t), true) = (need_target("recover from"), need_path("folder")) {
-                            run(log, vec!["undelete".into(), t, "--to".into(), out.clone()]);
-                        }
-                    }
-                    ID_CARVE => {
-                        if let (Some(t), true) = (need_target("carve"), need_path("folder")) {
-                            run(log, vec!["carve".into(), t, "--to".into(), out.clone()]);
-                        }
-                    }
-                    ID_MOUNT => {
-                        if need_path("file (.vhdx)") {
-                            run(log, vec!["mount".into(), out.clone()]);
-                        }
-                    }
-                    _ => {}
-                }
+            // Copy what is needed and release the borrow before touching any
+            // control. Holding it across a SendMessage is what turned that
+            // re-entry into an abort: a second borrow_mut panics, and a panic
+            // cannot unwind out of a window procedure.
+            let snap = UI.with(|u| {
+                u.borrow().as_ref().map(|ui| (ui.list, ui.path, ui.log, ui.targets.clone()))
             });
+            let Some((list, path, log, targets)) = snap else { return LRESULT(0) };
+
+            let out = text_of(path);
+            let target = selected(list, &targets);
+            let need_target = |verb: &str| -> Option<String> {
+                if target.is_none() {
+                    append(log, &format!("[!] pick a disk or volume to {verb}
+"));
+                }
+                target.clone()
+            };
+            let need_path = |what: &str| -> bool {
+                let ok = !out.trim().is_empty();
+                if !ok {
+                    append(log, &format!("[!] fill in the output {what} first
+"));
+                }
+                ok
+            };
+
+            match id {
+                ID_REFRESH => {
+                    let targets = refresh(list);
+                    UI.with(|u| {
+                        if let Some(ui) = u.borrow_mut().as_mut() {
+                            ui.targets = targets;
+                        }
+                    });
+                }
+                ID_SCAN => {
+                    if let Some(t) = need_target("scan") {
+                        run(log, vec!["scan".into(), t]);
+                    }
+                }
+                ID_IMAGE => {
+                    if let (Some(t), true) = (need_target("image"), need_path("file (.vhdx)")) {
+                        run(log, vec!["image".into(), t, out.clone()]);
+                    }
+                }
+                ID_UNDELETE => {
+                    if let (Some(t), true) = (need_target("recover from"), need_path("folder")) {
+                        run(log, vec!["undelete".into(), t, "--to".into(), out.clone()]);
+                    }
+                }
+                ID_CARVE => {
+                    if let (Some(t), true) = (need_target("carve"), need_path("folder")) {
+                        run(log, vec!["carve".into(), t, "--to".into(), out.clone()]);
+                    }
+                }
+                ID_MOUNT => {
+                    if need_path("file (.vhdx)") {
+                        run(log, vec!["mount".into(), out.clone()]);
+                    }
+                }
+                _ => {}
+            }
             LRESULT(0)
         }
         WM_SIZE => {
-            UI.with(|u| {
-                if let Some(ui) = u.borrow().as_ref() {
-                    let (w, h) = ((lp.0 & 0xFFFF) as i32, ((lp.0 >> 16) & 0xFFFF) as i32);
-                    unsafe {
-                        let _ = MoveWindow(ui.list, 10, 25, w - 20, 150, true);
-                        let _ = MoveWindow(ui.path, 100, 190, w - 110, 22, true);
-                        let _ = MoveWindow(ui.log, 10, 260, w - 20, h - 270, true);
-                    }
+            let snap = UI.with(|u| u.borrow().as_ref().map(|ui| (ui.list, ui.path, ui.log)));
+            if let Some((list, path, log)) = snap {
+                let (w, h) = ((lp.0 & 0xFFFF) as i32, ((lp.0 >> 16) & 0xFFFF) as i32);
+                unsafe {
+                    let _ = MoveWindow(list, 10, 25, w - 20, 150, true);
+                    let _ = MoveWindow(path, 100, 190, w - 110, 22, true);
+                    let _ = MoveWindow(log, 10, 260, w - 20, h - 270, true);
                 }
-            });
+            }
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -306,11 +327,8 @@ pub fn run_gui() -> Res<()> {
                               | ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32,
                           10, 260, 720, 300, hwnd, ID_LOG);
 
-        UI.with(|u| {
-            let mut ui = Ui { list, path, log, targets: Vec::new() };
-            refresh(&mut ui);
-            *u.borrow_mut() = Some(ui);
-        });
+        let targets = refresh(list);
+        UI.with(|u| *u.borrow_mut() = Some(Ui { list, path, log, targets }));
 
         append(log, "bulkhead -- pick a disk or volume, set an output path, press a button.\r\n");
         append(log, "Read-only operations only. restore, part move and scan --rebuild\r\n");
