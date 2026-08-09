@@ -332,7 +332,11 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
             eprintln!("[*] snapshotting {l}:");
             match Snapshot::create(&format!("{l}:")) {
                 Ok(sn) => shadows.push((i, sn)),
-                Err(e) => eprintln!("[!] {l}: no snapshot ({e}); copying it raw instead"),
+                // Not a failure worth stopping for: an unsnapshottable volume
+                // is copied raw, which is exactly right for the FAT and
+                // removable volumes VSS declines.
+                Err(e) => eprintln!("[!] {l}: {e}
+    copying it raw instead"),
             }
         }
     }
