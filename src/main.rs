@@ -814,10 +814,13 @@ fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) -> R
         let dest = std::path::Path::new(out_dir).join(format!("{:04}_{}", i, safe));
         match fs.read_file(d) {
             Ok(data) => {
+                let partial = (data.len() as u64) < d.size;
                 std::fs::write(&dest, &data)?;
                 ok += 1;
                 bytes += data.len() as u64;
-                eprintln!("  {} ({})", safe, human(d.size));
+                eprintln!("  {} ({}){}", safe, human(d.size),
+                          if partial { format!(" -- PARTIAL, only {} readable", human(data.len() as u64)) }
+                          else { String::new() });
             }
             Err(e) => eprintln!("  [!] {safe}: {e}"),
         }

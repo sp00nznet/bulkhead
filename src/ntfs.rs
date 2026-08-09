@@ -315,9 +315,16 @@ impl<'a> Ntfs<'a> {
             let read = want.div_ceil(self.cluster) * self.cluster;
             let mut buf = vec![0u8; read as usize];
             self.disk.seek(self.base + lcn * self.cluster)?;
-            self.disk.read(&mut buf).ctx("read file data")?;
-            buf.truncate(want as usize);
+            // The count matters. Ignoring it turns a failed read into a
+            // correctly-sized file full of zeros, which looks like a
+            // successful recovery and is the worst thing this could do.
+            let got = self.disk.read(&mut buf).ctx("read file data")?;
+            buf.truncate((got as u64).min(want) as usize);
+            let short = buf.len() as u64 != want;
             out.extend_from_slice(&buf);
+            if short {
+                break;
+            }
         }
         out.truncate(d.size as usize);
         Ok(out)
