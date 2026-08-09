@@ -56,6 +56,7 @@ bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead undo <diskN> <TABLE.bin> [--yes]
 bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
+bulkhead gui
 bulkhead media <OUT.iso>
 ```
 
@@ -137,7 +138,7 @@ stranded behind a partition table describing the old disk.
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
-- [ ] GUI — everything is CLI-only, which is a real adoption ceiling
+- [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -153,8 +154,9 @@ The five things people currently pay for. Each one builds on the last:
    Outstanding: MBR disks are rejected outright.
 3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
    table is gone and rebuilds it, which is TestDisk's headline feature.
-   `undelete` recovers files from a surviving MFT and `carve` works from raw
-   signatures when there is none. Outstanding: the GUI itself.
+   **done.** `scan` rebuilds a lost partition table, `undelete` recovers files
+   from a surviving MFT, `carve` works from raw signatures when there is none,
+   and `bulkhead gui` fronts all of it.
 4. **Filesystem drivers** — ext4/XFS/APFS/HFS+ read support. Needed for #3
    anyway; exposing it as a mountable volume (WinFsp) is nearly free once the
    parser exists.
@@ -299,6 +301,23 @@ Two things it cannot do. Carved files have **no names** — only the offset they
 came from. And each is one contiguous stretch, so anything the filesystem
 **fragmented** comes back truncated at the first gap. Use `undelete` whenever
 the MFT survives; carve only when it does not.
+
+## The window
+
+```powershell
+bulkhead gui
+```
+
+![](docs/gui.png)
+
+Native Win32 controls, no toolkit, no new dependencies — so it runs anywhere
+USER32 does, including WinPE, where the recovery media actually needs it.
+
+The window never touches a disk. Every button runs bulkhead as a child process
+and pipes its output into the log, so the GUI can get the arguments wrong but
+never the engine. **Destructive commands are deliberately absent** — `restore`,
+`part move` and `scan --rebuild` stay on the command line, where their
+confirmations are.
 
 ## Design notes
 

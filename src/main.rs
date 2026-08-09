@@ -6,6 +6,7 @@
 mod bitmap;
 mod carve;
 mod gpt;
+mod gui;
 mod media;
 mod ntfs;
 mod scan;
@@ -1129,6 +1130,10 @@ bulkhead -- block-level backup and recovery for Windows
       Last resort: pull files out by their signatures when no filesystem
       survives. No names, and fragmented files come back truncated.
 
+  bulkhead gui
+      A window over the read-only operations, for people who do not
+      want a command line. Destructive commands stay here.
+
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
@@ -1162,6 +1167,7 @@ fn main() {
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
+        ["gui"] => gui::run_gui(),
         ["carve", t] => match opt("--to") {
             Some(dir) => cmd_carve(t, dir,
                                    opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(5_000)),
