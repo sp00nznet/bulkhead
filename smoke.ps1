@@ -292,10 +292,18 @@ try {
     # keep a copy off-volume so a mismatch can be compared byte for byte
     $goneCopy = Join-Path $work 'deleteme-original.txt'
     Copy-Item $gone $goneCopy -Force
+
+    # Force the contents onto the platter BEFORE deleting. A file written and
+    # deleted inside the cache window may never be written at all -- NTFS drops
+    # the dirty pages on delete -- so there would be nothing on disk to
+    # recover, which looks exactly like a broken recovery.
+    Write-VolumeCache -DriveLetter $rec.DriveLetter
+    Start-Sleep -Seconds 2
+
     Remove-Item $gone -Force
     Remove-Item "$vol\bulk.dat" -Force -ErrorAction SilentlyContinue
-    # Flush, or the MFT change may still be sitting in cache
-    Write-VolumeCache -DriveLetter $rec.DriveLetter -ErrorAction SilentlyContinue
+    # and again, so the MFT records marking them deleted reach the disk too
+    Write-VolumeCache -DriveLetter $rec.DriveLetter
     Start-Sleep -Seconds 2
 
     $recovered = Join-Path $work 'recovered'
