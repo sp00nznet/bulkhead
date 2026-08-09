@@ -141,7 +141,7 @@ stranded behind a partition table describing the old disk.
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
 - [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE
-- [x] `ls` / `cp` — read ext2/3/4 and XFS volumes Windows cannot mount
+- [x] `ls` / `cp` — read ext2/3/4, XFS and HFS+ volumes Windows cannot mount
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -160,9 +160,10 @@ The five things people currently pay for. Each one builds on the last:
    **done.** `scan` rebuilds a lost partition table, `undelete` recovers files
    from a surviving MFT, `carve` works from raw signatures when there is none,
    and `bulkhead gui` fronts all of it.
-4. **Filesystem drivers** — *in progress.* `ls` and `cp` read ext2/3/4 and
-   XFS, which Windows cannot. Outstanding: APFS, HFS+, ext2/3 indirect maps,
-   XFS b-tree forks, and exposing them as mountable volumes via WinFsp.
+4. **Filesystem drivers** — *in progress.* `ls` and `cp` read ext2/3/4, XFS
+   and HFS+, which Windows cannot. Outstanding: member inspection for
+   multi-disk sets, APFS, btrfs, and exposing all of them as mountable volumes
+   via WinFsp.
 5. **Certified secure erase** — ATA Secure Erase / NVMe Sanitize plus a signed
    PDF. Every lease return needs the paperwork. A weekend of work; sold for
    real money per drive.
@@ -320,7 +321,7 @@ never the engine. **Destructive commands are deliberately absent** — `restore`
 `part move` and `scan --rebuild` stay on the command line, where their
 confirmations are.
 
-## Reading ext2/3/4 and XFS
+## Reading ext2/3/4, XFS and HFS+
 
 ```powershell
 bulkhead ls disk2 --at 1MB              # what is on the Linux partition
@@ -337,15 +338,18 @@ ext4 is the straightforward one: a superblock gives the layout, group
 descriptors locate the inode tables, each inode carries a tree of extents. XFS
 is big-endian, packs an allocation-group index into the top of every block and
 inode number, and stores extents as bitfields straddling two 64-bit words —
-so most of its work is shifting fields apart before they mean anything.
+so most of its work is shifting fields apart before they mean anything. HFS+
+puts every directory entry on the volume in one B-tree keyed by parent folder
+and name, with each node's record offsets stored backwards at the end of it.
 
 **Read-only, deliberately and permanently.** Writing ext4 safely means
 implementing its journal, and a half-understood journal is how filesystems get
 destroyed. bulkhead reads these; Linux writes them.
 
 Not yet, and refused with a clear message rather than misread: ext2/ext3
-volumes predating extents (indirect block maps), and XFS files or directories
-large enough to need b-tree forks. APFS and HFS+ are next.
+volumes predating extents (indirect block maps), XFS files large enough to need
+b-tree forks, HFS+ forks continuing into the extents overflow file, and old HFS
+volumes with HFS+ embedded inside them. APFS and btrfs are next.
 
 ## Design notes
 

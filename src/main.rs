@@ -7,6 +7,7 @@ mod bitmap;
 mod carve;
 mod ext4;
 mod gpt;
+mod hfs;
 mod gui;
 mod media;
 mod ntfs;
@@ -887,6 +888,7 @@ struct Entry {
 enum Fs<'a> {
     Ext(ext4::Ext<'a>),
     Xfs(xfs::Xfs<'a>),
+    Hfs(hfs::Hfs<'a>),
 }
 
 impl<'a> Fs<'a> {
@@ -894,10 +896,13 @@ impl<'a> Fs<'a> {
         if let Ok(e) = ext4::Ext::open(disk, base) {
             return Ok(Fs::Ext(e));
         }
-        match xfs::Xfs::open(disk, base) {
-            Ok(x) => Ok(Fs::Xfs(x)),
+        if let Ok(x) = xfs::Xfs::open(disk, base) {
+            return Ok(Fs::Xfs(x));
+        }
+        match hfs::Hfs::open(disk, base) {
+            Ok(h) => Ok(Fs::Hfs(h)),
             Err(_) => Err(format!(
-                "no ext2/3/4 or XFS volume at {}.
+                "no ext2/3/4, XFS or HFS+ volume at {}.
                      NTFS and FAT are readable by Windows itself; for those use                  Explorer, or `bulkhead undelete` for deleted files.",
                 human(base)
             ).into()),
@@ -910,6 +915,8 @@ impl<'a> Fs<'a> {
                 if e.label.is_empty() { String::new() } else { format!(", label {:?}", e.label) }),
             Fs::Xfs(x) => format!("XFS, {}-byte blocks{}", x.blocksize,
                 if x.label.is_empty() { String::new() } else { format!(", label {:?}", x.label) }),
+            Fs::Hfs(h) => format!("HFS+{}, {}-byte blocks",
+                if h.case_sensitive { "X (case-sensitive)" } else { "" }, h.block_size),
         }
     }
 
@@ -917,6 +924,7 @@ impl<'a> Fs<'a> {
         match self {
             Fs::Ext(e) => e.resolve(path),
             Fs::Xfs(x) => x.resolve(path),
+            Fs::Hfs(h) => h.resolve(path).map(|(id, d)| (id as u64, d)),
         }
     }
 
@@ -926,6 +934,8 @@ impl<'a> Fs<'a> {
                 .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
             Fs::Xfs(x) => x.read_dir(ino)?.into_iter()
                 .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
+            Fs::Hfs(h) => h.read_dir(ino as u32)?.into_iter()
+                .map(|d| Entry { inode: d.id as u64, name: d.name, is_dir: d.is_dir }).collect(),
         })
     }
 
@@ -933,6 +943,7 @@ impl<'a> Fs<'a> {
         match self {
             Fs::Ext(e) => e.read_file(ino),
             Fs::Xfs(x) => x.read_file(ino),
+            Fs::Hfs(h) => h.read_file(ino as u32),
         }
     }
 
@@ -940,6 +951,7 @@ impl<'a> Fs<'a> {
         match self {
             Fs::Ext(e) => e.size_of(ino),
             Fs::Xfs(x) => x.size_of(ino),
+            Fs::Hfs(h) => h.size_of(ino as u32),
         }
     }
 }
@@ -1305,7 +1317,7 @@ bulkhead -- block-level backup and recovery for Windows
 
   bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
   bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
-      Read ext2/3/4 volumes, which Windows cannot. PATH is inside the
+      Read ext2/3/4, XFS and HFS+ volumes, which Windows cannot. PATH is inside the
       filesystem; cp takes a file or a whole directory tree.
 
   bulkhead gui
