@@ -70,6 +70,10 @@ pub struct Caps {
     pub nvme_sanitize_crypto: bool,
     pub nvme_sanitize_block: bool,
     pub nvme_sanitize_overwrite: bool,
+    /// Whether the drive answered a capability query at all. Without this,
+    /// a query that never reached the drive is indistinguishable from a drive
+    /// that says it cannot erase itself -- and those need opposite responses.
+    pub answered: bool,
 }
 
 impl Caps {
@@ -123,7 +127,10 @@ impl Caps {
         if self.ata_security_enabled {
             v.push("an ATA password is already set; it must be known to erase".into());
         }
-        if self.methods().is_empty() {
+        if !self.answered {
+            v.push("the drive did not answer a capability query, so nothing here is                     known either way. Its storage driver may not pass these through                     -- Intel RST and VMD commonly do not. Switching the controller to                     standard AHCI/NVMe, or attaching the drive elsewhere, makes it                     answerable."
+                .into());
+        } else if self.methods().is_empty() {
             v.push("this drive reports no usable erase command".into());
         }
         v
@@ -216,6 +223,7 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
     if data.iter().all(|&b| b == 0) {
         return Err("IDENTIFY returned nothing".into());
     }
+    caps.answered = true;
 
     if caps.model.is_empty() {
         caps.model = ata_string(&data, 27, 20);
@@ -317,6 +325,7 @@ fn nvme_identify_via(
     if id.len() < 532 || id.iter().all(|&b| b == 0) {
         return Err("Identify Controller returned nothing".into());
     }
+    caps.answered = true;
 
     if caps.model.is_empty() {
         caps.serial = String::from_utf8_lossy(&id[4..24]).trim().to_string();
@@ -439,6 +448,7 @@ mod tests {
             nvme_format: true,
             nvme_crypto_erase: true,
             nvme_sanitize_crypto: true,
+            answered: true,
             ..Default::default()
         };
         // A crypto sanitize beats a format, which beats nothing.
@@ -448,7 +458,8 @@ mod tests {
 
     #[test]
     fn a_frozen_drive_reports_why_it_cannot_erase() {
-        let caps = Caps { ata_security: true, ata_frozen: true, ..Default::default() };
+        let caps = Caps { ata_security: true, ata_frozen: true, answered: true,
+            ..Default::default() };
         assert!(caps.methods().is_empty(), "a frozen drive offers nothing");
         let why = caps.blockers().join(" ");
         assert!(why.contains("FROZEN"), "must say what to do about it: {why}");
@@ -464,6 +475,7 @@ mod tests {
             ata_frozen: true,
             ata_sanitize: true,
             ata_sanitize_overwrite: true,
+            answered: true,
             ..Default::default()
         };
         assert_eq!(caps.methods(), vec!["ata-sanitize-overwrite"]);
@@ -479,6 +491,7 @@ mod tests {
             ata_frozen: true,
             ata_sanitize: true,
             ata_sanitize_crypto: true,
+            answered: true,
             ..Default::default()
         };
         assert_eq!(caps.methods(), vec!["ata-sanitize-crypto"]);
@@ -486,10 +499,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unanswered_query_is_not_a_negative_answer() {
+        // A drive behind a controller that will not pass these through tells
+        // us nothing. Reporting that as "no erase command" states something
+        // about the drive that was never established.
+        let silent = Caps { answered: false, ..Default::default() };
+        let why = silent.blockers().join(" ");
+        assert!(why.contains("did not answer"), "must not claim the drive said no: {why}");
+        assert!(!why.contains("reports no usable erase command"));
+
+        // A drive that did answer, with nothing to offer, is a real negative.
+        let answered = Caps { answered: true, ..Default::default() };
+        assert!(answered.blockers().iter().any(|b| b.contains("reports no usable")));
+    }
+
+    #[test]
     fn usb_is_called_out_as_untrustworthy() {
         let caps = Caps {
             bus: Some(Bus::Usb),
             nvme_sanitize_crypto: true,
+            answered: true,
             ..Default::default()
         };
         assert!(caps.blockers().iter().any(|b| b.contains("USB")));

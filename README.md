@@ -466,6 +466,10 @@ usefully it says what is **stopping** one:
 - **USB** — bridges rarely pass these commands through, and one that
   half-implements them can report success without erasing anything.
 - **password already set** — an existing ATA password must be known first.
+- **the drive did not answer** — some storage drivers, Intel RST and VMD
+  especially, do not pass capability queries through at all. That is reported
+  as *unknown*, never as "this drive cannot be erased": a question that was
+  never asked is not a negative answer.
 
 Actually issuing the erase is not implemented yet. It destroys a drive with no
 image to restore from, and unlike everything else here it cannot be tested

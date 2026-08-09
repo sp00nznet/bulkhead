@@ -1010,12 +1010,15 @@ fn cmd_erase_info(target: &str) -> Res<()> {
         eprintln!("  {l}");
     }
     let methods = caps.methods();
-    if methods.is_empty() {
+    if !methods.is_empty() {
+        eprintln!("
+[*] usable: {}", methods.join(", "));
+    } else if caps.answered {
         eprintln!("
 [!] no usable erase command on this drive");
     } else {
         eprintln!("
-[*] usable: {}", methods.join(", "));
+[!] erase capability unknown -- the drive did not answer");
     }
     for b in caps.blockers() {
         eprintln!("[!] {b}");
