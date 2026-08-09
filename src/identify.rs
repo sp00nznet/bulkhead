@@ -363,6 +363,35 @@ fn vmfs(disk: &Raw, base: u64) -> Option<Report> {
     Some(Report { kind: "VMFS", lines })
 }
 
+// --- what Windows already handles -------------------------------------------
+
+/// Name NTFS, exFAT and FAT where they are found.
+///
+/// bulkhead does not read these -- Windows does it better -- but saying so is
+/// the difference between "here is your ESP" and a bare "nothing recognised"
+/// on an entirely healthy disk.
+fn windows_fs(disk: &Raw, base: u64) -> Option<Report> {
+    let bs = read_at(disk, base, 0, 512)?;
+    if bs[510..512] != [0x55, 0xAA] {
+        return None;
+    }
+    let kind = if &bs[3..11] == b"NTFS    " {
+        "NTFS"
+    } else if &bs[3..11] == b"EXFAT   " {
+        "exFAT"
+    } else if &bs[0x52..0x57] == b"FAT32" {
+        "FAT32"
+    } else if matches!(&bs[0x36..0x3B], b"FAT16" | b"FAT12" | b"FAT  ") {
+        "FAT"
+    } else {
+        return None;
+    };
+    Some(Report {
+        kind: "filesystem",
+        lines: vec![format!("{kind} -- Windows reads this natively; open it in Explorer")],
+    })
+}
+
 /// Everything that recognises itself on this device.
 pub fn identify(disk: &Raw, base: u64, size: u64) -> Res<Vec<Report>> {
     let mut out = Vec::new();
@@ -375,6 +404,7 @@ pub fn identify(disk: &Raw, base: u64, size: u64) -> Res<Vec<Report>> {
         squashfs(disk, base),
         ufs2(disk, base),
         vmfs(disk, base),
+        windows_fs(disk, base),
     ]
     .into_iter()
     .flatten()

@@ -965,27 +965,39 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
 
     // Probe the device itself, then each partition on it. A NAS disk carries
     // its RAID metadata on the partition, not the disk.
-    let mut spots = vec![(base, String::from("whole device"))];
+    let mut spots = vec![(base, String::from("whole device"), 0u64)];
+    let mut have_table = false;
     if at.is_none() && disk_arg(target).is_some() {
         if let Ok(t) = Table::read(&disk) {
+            have_table = true;
             for p in gpt::entries(&t.header, &t.array) {
-                spots.push((p.start_lba * t.sector, format!("partition {}", p.number)));
+                spots.push((
+                    p.start_lba * t.sector,
+                    format!("partition {} {:?}", p.number, p.name),
+                    p.sectors() * t.sector,
+                ));
             }
         }
     }
+    if !have_table && at.is_none() && disk_arg(target).is_some() {
+        eprintln!("[*] no GPT here -- an MBR disk, or no table at all");
+    }
 
     let mut found = 0;
-    for (off, what) in spots {
-        // Everything reads relative to this offset, so hand each probe a view
-        // that starts there rather than teaching them all about partitions.
+    for (off, what, len) in spots {
         let reports = identify::identify(&disk, off, size.saturating_sub(off))
             .unwrap_or_default();
         let fs = Fs::open(&disk, off).ok();
-        if reports.is_empty() && fs.is_none() {
+
+        // Whole-device silence is normal on a partitioned disk; a partition
+        // that nothing recognises is worth saying out loud.
+        let is_device = off == base && len == 0;
+        if reports.is_empty() && fs.is_none() && is_device {
             continue;
         }
         eprintln!("
-{what} at {}:", human(off));
+{what} at {}{}", human(off),
+                  if len > 0 { format!(", {}", human(len)) } else { String::new() });
         for r in reports {
             eprintln!("  {}", r.kind);
             for l in r.lines {
@@ -997,6 +1009,8 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
             eprintln!("  {}", f.describe());
             eprintln!("      readable: bulkhead ls {target} --at {off}");
             found += 1;
+        } else if found == 0 || len > 0 {
+            eprintln!("  nothing recognised here");
         }
     }
     if found == 0 {

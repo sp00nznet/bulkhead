@@ -375,6 +375,7 @@ filesystem at all.
 | **SquashFS** | version, inode count, compression |
 | **UFS2** | block size, last mount point, volume name |
 | **VMFS** | version and label |
+| **NTFS / exFAT / FAT** | named only — Windows reads these itself |
 
 It probes the whole device and then every partition on it, because a NAS disk
 carries its RAID metadata on the partition rather than the disk.
