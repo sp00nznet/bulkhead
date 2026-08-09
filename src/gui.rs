@@ -24,8 +24,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::util::{ps, wide, Res};
 
 const ID_LIST: usize = 100;
-const ID_PATH: usize = 101;
+const ID_IMG: usize = 101;
 const ID_LOG: usize = 102;
+const ID_DIR: usize = 103;
+const ID_BROWSE_IMG: usize = 110;
+const ID_BROWSE_DIR: usize = 111;
 const ID_REFRESH: usize = 200;
 const ID_IMAGE: usize = 201;
 const ID_SCAN: usize = 202;
@@ -45,7 +48,10 @@ unsafe impl Send for Win {}
 
 struct Ui {
     list: HWND,
-    path: HWND,
+    /// Where an image is written to or read from.
+    img: HWND,
+    /// Where recovered files are written.
+    dir: HWND,
     log: HWND,
     /// The bulkhead argument for each row, parallel to the listbox.
     targets: Vec<String>,
@@ -126,6 +132,68 @@ fn selected(list: HWND, targets: &[String]) -> Option<String> {
     targets.get(i as usize).cloned()
 }
 
+/// Common file dialog. `save` picks the create-a-new-file flavour.
+fn pick_file(owner: HWND, save: bool, title: &str) -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+    let mut buf = [0u16; 520];
+    let title = wide(title);
+    // Double-NUL terminated pairs of description and pattern.
+    let filter: Vec<u16> = "Disk images (*.vhdx)\0*.vhdx\0All files\0*.*\0\0"
+        .encode_utf16().collect();
+    let ext = wide("vhdx");
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        lpstrDefExt: PCWSTR(ext.as_ptr()),
+        Flags: if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST },
+        ..Default::default()
+    };
+    let ok = unsafe {
+        if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) }
+    };
+    if !ok.as_bool() {
+        return None;
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+}
+
+fn pick_folder(owner: HWND, title: &str) -> Option<String> {
+    use windows::Win32::UI::Shell::{SHBrowseForFolderW, SHGetPathFromIDListW,
+                                   BROWSEINFOW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS};
+    let title = wide(title);
+    let bi = BROWSEINFOW {
+        hwndOwner: owner,
+        lpszTitle: PCWSTR(title.as_ptr()),
+        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ..Default::default()
+    };
+    unsafe {
+        let idl = SHBrowseForFolderW(&bi);
+        if idl.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 260];
+        let ok = SHGetPathFromIDListW(idl, &mut buf).as_bool();
+        // The shell allocated the id list; nothing else will free it.
+        windows::Win32::System::Com::CoTaskMemFree(Some(idl as *const _));
+        if !ok {
+            return None;
+        }
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+fn set_text(h: HWND, s: &str) {
+    let w = wide(s);
+    unsafe { let _ = SetWindowTextW(h, PCWSTR(w.as_ptr())); }
+}
+
 fn text_of(h: HWND) -> String {
     let n = unsafe { GetWindowTextLengthW(h) } as usize;
     let mut buf = vec![0u16; n + 1];
@@ -194,11 +262,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             // re-entry into an abort: a second borrow_mut panics, and a panic
             // cannot unwind out of a window procedure.
             let snap = UI.with(|u| {
-                u.borrow().as_ref().map(|ui| (ui.list, ui.path, ui.log, ui.targets.clone()))
+                u.borrow().as_ref()
+                    .map(|ui| (ui.list, ui.img, ui.dir, ui.log, ui.targets.clone()))
             });
-            let Some((list, path, log, targets)) = snap else { return LRESULT(0) };
+            let Some((list, img, dir, log, targets)) = snap else { return LRESULT(0) };
 
-            let out = text_of(path);
+            let image_path = text_of(img);
+            let out_dir = text_of(dir);
             let target = selected(list, &targets);
             let need_target = |verb: &str| -> Option<String> {
                 if target.is_none() {
@@ -207,10 +277,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 target.clone()
             };
-            let need_path = |what: &str| -> bool {
-                let ok = !out.trim().is_empty();
+            let need = |v: &str, what: &str| -> bool {
+                let ok = !v.trim().is_empty();
                 if !ok {
-                    append(log, &format!("[!] fill in the output {what} first
+                    append(log, &format!("[!] {what}
 "));
                 }
                 ok
@@ -225,29 +295,48 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         }
                     });
                 }
+                ID_BROWSE_IMG => {
+                    // Saving for a new image, opening for one to mount: the
+                    // same box serves both, so offer the create-a-file dialog
+                    // and let an existing file be picked from it.
+                    if let Some(f) = pick_file(hwnd, true, "Image file") {
+                        set_text(img, &f);
+                    }
+                }
+                ID_BROWSE_DIR => {
+                    if let Some(f) = pick_folder(hwnd, "Folder to write recovered files into") {
+                        set_text(dir, &f);
+                    }
+                }
                 ID_SCAN => {
                     if let Some(t) = need_target("scan") {
                         run(log, vec!["scan".into(), t]);
                     }
                 }
                 ID_IMAGE => {
-                    if let (Some(t), true) = (need_target("image"), need_path("file (.vhdx)")) {
-                        run(log, vec!["image".into(), t, out.clone()]);
-                    }
-                }
-                ID_UNDELETE => {
-                    if let (Some(t), true) = (need_target("recover from"), need_path("folder")) {
-                        run(log, vec!["undelete".into(), t, "--to".into(), out.clone()]);
-                    }
-                }
-                ID_CARVE => {
-                    if let (Some(t), true) = (need_target("carve"), need_path("folder")) {
-                        run(log, vec!["carve".into(), t, "--to".into(), out.clone()]);
+                    if let (Some(t), true) =
+                        (need_target("image"), need(&image_path, "choose an image file to write"))
+                    {
+                        run(log, vec!["image".into(), t, image_path.clone()]);
                     }
                 }
                 ID_MOUNT => {
-                    if need_path("file (.vhdx)") {
-                        run(log, vec!["mount".into(), out.clone()]);
+                    if need(&image_path, "choose the image file to mount") {
+                        run(log, vec!["mount".into(), image_path.clone()]);
+                    }
+                }
+                ID_UNDELETE => {
+                    if let (Some(t), true) =
+                        (need_target("recover from"), need(&out_dir, "choose a folder to recover into"))
+                    {
+                        run(log, vec!["undelete".into(), t, "--to".into(), out_dir.clone()]);
+                    }
+                }
+                ID_CARVE => {
+                    if let (Some(t), true) =
+                        (need_target("carve"), need(&out_dir, "choose a folder to recover into"))
+                    {
+                        run(log, vec!["carve".into(), t, "--to".into(), out_dir.clone()]);
                     }
                 }
                 _ => {}
@@ -255,13 +344,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             LRESULT(0)
         }
         WM_SIZE => {
-            let snap = UI.with(|u| u.borrow().as_ref().map(|ui| (ui.list, ui.path, ui.log)));
-            if let Some((list, path, log)) = snap {
+            let snap = UI.with(|u| u.borrow().as_ref().map(|ui| (ui.list, ui.img, ui.dir, ui.log)));
+            if let Some((list, img, dir, log)) = snap {
                 let (w, h) = ((lp.0 & 0xFFFF) as i32, ((lp.0 >> 16) & 0xFFFF) as i32);
                 unsafe {
                     let _ = MoveWindow(list, 10, 25, w - 20, 150, true);
-                    let _ = MoveWindow(path, 100, 190, w - 110, 22, true);
-                    let _ = MoveWindow(log, 10, 260, w - 20, h - 270, true);
+                    let _ = MoveWindow(img, 150, 190, w - 250, 22, true);
+                    let _ = MoveWindow(dir, 150, 220, w - 250, 22, true);
+                    let _ = MoveWindow(log, 10, 300, w - 20, h - 310, true);
                 }
             }
             LRESULT(0)
@@ -304,35 +394,50 @@ pub fn run_gui() -> Res<()> {
                            PCWSTR::null(),
                            (WS_BORDER | WS_VSCROLL).0 | LBS_NOTIFY as u32,
                            10, 25, 720, 150, hwnd, ID_LIST);
-        control(w!("STATIC"), w!("Output file/folder:"), 0, 10, 193, 90, 16, hwnd, 0);
-        let path = control(w!("EDIT"), PCWSTR::null(), (WS_BORDER | WS_TABSTOP).0,
-                           100, 190, 630, 22, hwnd, ID_PATH);
+        // Two paths, because they are two different things and one box asking
+        // for "file/folder" could not say which a given button wanted.
+        control(w!("STATIC"), w!("Image file (.vhdx):"), 0, 10, 193, 135, 16, hwnd, 0);
+        let img = control(w!("EDIT"), PCWSTR::null(), (WS_BORDER | WS_TABSTOP).0,
+                          150, 190, 510, 22, hwnd, ID_IMG);
+        control(w!("BUTTON"), w!("Browse..."), WS_TABSTOP.0, 665, 189, 85, 24,
+                hwnd, ID_BROWSE_IMG);
+
+        control(w!("STATIC"), w!("Recover files into:"), 0, 10, 223, 135, 16, hwnd, 0);
+        let dir = control(w!("EDIT"), PCWSTR::null(), (WS_BORDER | WS_TABSTOP).0,
+                          150, 220, 510, 22, hwnd, ID_DIR);
+        control(w!("BUTTON"), w!("Browse..."), WS_TABSTOP.0, 665, 219, 85, 24,
+                hwnd, ID_BROWSE_DIR);
 
         let mut x = 10;
-        for (id, label) in [
-            (ID_REFRESH, w!("Refresh")),
-            (ID_SCAN, w!("Scan for lost partitions")),
-            (ID_IMAGE, w!("Image")),
-            (ID_UNDELETE, w!("Undelete")),
-            (ID_CARVE, w!("Carve")),
-            (ID_MOUNT, w!("Mount image")),
+        for (id, label, width) in [
+            (ID_REFRESH, w!("Refresh"), 80),
+            (ID_SCAN, w!("Scan for lost partitions"), 150),
+            (ID_IMAGE, w!("Disk -> image"), 110),
+            (ID_MOUNT, w!("Mount image"), 100),
+            (ID_UNDELETE, w!("Undelete files"), 110),
+            (ID_CARVE, w!("Carve files"), 100),
         ] {
-            let width = if id == ID_SCAN { 160 } else { 100 };
-            control(w!("BUTTON"), label, WS_TABSTOP.0, x, 222, width, 26, hwnd, id);
-            x += width + 8;
+            control(w!("BUTTON"), label, WS_TABSTOP.0, x, 252, width, 26, hwnd, id);
+            x += width + 6;
         }
 
         let log = control(w!("EDIT"), PCWSTR::null(),
                           (WS_BORDER | WS_VSCROLL).0
                               | ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32,
-                          10, 260, 720, 300, hwnd, ID_LOG);
+                          10, 300, 740, 270, hwnd, ID_LOG);
 
         let targets = refresh(list);
-        UI.with(|u| *u.borrow_mut() = Some(Ui { list, path, log, targets }));
+        UI.with(|u| *u.borrow_mut() = Some(Ui { list, img, dir, log, targets }));
 
-        append(log, "bulkhead -- pick a disk or volume, set an output path, press a button.\r\n");
-        append(log, "Read-only operations only. restore, part move and scan --rebuild\r\n");
-        append(log, "stay on the command line, where their confirmations are.\r\n");
+        append(log, "Pick a disk or volume above, then:\r\n");
+        append(log, "  Disk -> image    copies it into the image file (a backup)\r\n");
+        append(log, "  Mount image      attaches an image file as a drive to browse\r\n");
+        append(log, "  Scan             looks for partitions whose table is lost\r\n");
+        append(log, "  Undelete files   recovers deleted files into the folder\r\n");
+        append(log, "  Carve files      last resort: pulls files out by signature,\r\n");
+        append(log, "                   with no names, when no filesystem survives\r\n");
+        append(log, "\r\nRead-only here. restore, part move and scan --rebuild write to\r\n");
+        append(log, "disks and stay on the command line, where their confirmations are.\r\n");
         let admin = ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
             .unwrap_or_default();
         if !admin.trim().eq_ignore_ascii_case("true") {
