@@ -57,6 +57,7 @@ bulkhead undo <diskN> <TABLE.bin> [--yes]
 bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead identify <VOL|diskN> [--at <OFFSET>]
+bulkhead erase-info <diskN>
 bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
 bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
@@ -168,9 +169,9 @@ The five things people currently pay for. Each one builds on the last:
    and HFS+; `identify` recognises MD RAID, LVM2, ZFS, btrfs, bcachefs,
    SquashFS, UFS2 and VMFS members. Outstanding: F2FS and UFS2 reading, APFS,
    btrfs reading, and exposing them all as mountable volumes via WinFsp.
-5. **Certified secure erase** — ATA Secure Erase / NVMe Sanitize plus a signed
-   PDF. Every lease return needs the paperwork. A weekend of work; sold for
-   real money per drive.
+5. **Certified secure erase** — *in progress.* `erase-info` reports what a
+   drive supports and what is blocking an erase. Outstanding: issuing the
+   command, verification sampling, and the certificate.
 
 Linux and macOS are a stretch goal. Windows first, because that's where the
 gap is.
@@ -441,6 +442,34 @@ These are identification only. ZFS, VMFS and SquashFS are not read by bulkhead
 — SquashFS contents are always compressed, and the other two are large projects
 in themselves. Assemble MD/LVM on Linux, import ZFS with `zpool`, and the
 filesystem on top is then readable here.
+
+## Secure erase
+
+```powershell
+bulkhead erase-info disk3
+```
+
+Blancco and KillDisk charge per drive for one command the drive already
+implements, plus a piece of paper. The command is the easy part. The parts
+worth building are knowing *which* command a given drive will accept, and
+producing a record afterwards that means something — so that comes first, and
+it is read-only.
+
+It reports the drive's identity and every erase path it offers: ATA security
+erase, ATA sanitize (crypto/block/overwrite), NVMe format, NVMe sanitize. More
+usefully it says what is **stopping** one:
+
+- **FROZEN** — nearly every desktop firmware freezes the ATA security state at
+  boot, and a security erase cannot start until the drive is power-cycled.
+  Suspend and resume, or hot-plug it. ATA *sanitize* is a separate feature set
+  and is not affected, which is why it is preferred where available.
+- **USB** — bridges rarely pass these commands through, and one that
+  half-implements them can report success without erasing anything.
+- **password already set** — an existing ATA password must be known first.
+
+Actually issuing the erase is not implemented yet. It destroys a drive with no
+image to restore from, and unlike everything else here it cannot be tested
+without a drive to sacrifice.
 
 ## Design notes
 

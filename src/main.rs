@@ -5,6 +5,7 @@
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
 mod carve;
+mod erase;
 mod ext4;
 mod gpt;
 mod hfs;
@@ -991,6 +992,33 @@ impl<'a> Fs<'a> {
     }
 }
 
+/// Report what a drive can do about erasing itself. Read-only.
+fn cmd_erase_info(target: &str) -> Res<()> {
+    let Some(n) = disk_arg(target) else {
+        return Err(format!("{target:?} is not a disk; erase works on whole drives").into());
+    };
+    let path = format!(r"\\.\PhysicalDrive{n}");
+    let disk = Raw::open(&path, false).ctx("open disk")?;
+    eprintln!("[*] {path} ({})", human(disk.len().unwrap_or(0)));
+
+    let caps = erase::capabilities(&disk);
+    for l in erase::report(&caps) {
+        eprintln!("  {l}");
+    }
+    let methods = caps.methods();
+    if methods.is_empty() {
+        eprintln!("
+[!] no usable erase command on this drive");
+    } else {
+        eprintln!("
+[*] usable: {}", methods.join(", "));
+    }
+    for b in caps.blockers() {
+        eprintln!("[!] {b}");
+    }
+    Ok(())
+}
+
 /// Say what a device is, and what set it belongs to.
 fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
@@ -1452,6 +1480,10 @@ bulkhead -- block-level backup and recovery for Windows
       Mount an ext2/3/4, XFS or HFS+ volume as a Windows drive, read-only.
       Needs WinFsp (winget install WinFsp.WinFsp).
 
+  bulkhead erase-info <diskN>
+      What erase commands a drive supports, and what is stopping one.
+      Read-only.
+
   bulkhead gui
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
@@ -1491,6 +1523,7 @@ fn main() {
         ["media", iso] => media::build(iso),
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
+        ["erase-info", t] => cmd_erase_info(t),
         ["mount-fs", t, mp] => {
             cmd_mount_fs(t, opt("--at").and_then(parse_size), mp, flag("--debug"))
         }
