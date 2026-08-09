@@ -251,16 +251,39 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
 /// it will hand over Identify data on request -- that is what this query is
 /// for, and it is the supported way to ask.
 fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
-    const IDENTIFY_CONTROLLER: u32 = 1; // CNS value
     const DATA: usize = 4096;
 
     let head = size_of::<STORAGE_PROPERTY_QUERY>() - 1 // AdditionalParameters[1]
         + size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>();
-    let mut buf = vec![0u8; head + DATA + 1024];
+
+    // Some stacks answer this on the device, some on the adapter, and some on
+    // neither -- a drive behind a RAID or VMD controller is often invisible
+    // this way. Ask both before concluding anything.
+    let mut last = String::new();
+    for property in [
+        windows::Win32::System::Ioctl::StorageDeviceProtocolSpecificProperty,
+        windows::Win32::System::Ioctl::StorageAdapterProtocolSpecificProperty,
+    ] {
+        match nvme_identify_via(disk, caps, property, head, DATA) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("no protocol query answered ({last})").into())
+}
+
+fn nvme_identify_via(
+    disk: &Raw, caps: &mut Caps,
+    property: windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID,
+    head: usize, data_len: usize,
+) -> Res<()> {
+    const IDENTIFY_CONTROLLER: u32 = 1;
+    let data = data_len;
+    let mut buf = vec![0u8; head + data + 1024];
 
     unsafe {
         let q = buf.as_mut_ptr() as *mut STORAGE_PROPERTY_QUERY;
-        (*q).PropertyId = windows::Win32::System::Ioctl::StorageAdapterProtocolSpecificProperty;
+        (*q).PropertyId = property;
         (*q).QueryType = windows::Win32::System::Ioctl::PropertyStandardQuery;
         // The protocol request rides in AdditionalParameters.
         let p = (&mut (*q).AdditionalParameters) as *mut _ as *mut STORAGE_PROTOCOL_SPECIFIC_DATA;
@@ -269,7 +292,7 @@ fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
         (*p).ProtocolDataRequestValue = IDENTIFY_CONTROLLER;
         (*p).ProtocolDataRequestSubValue = 0;
         (*p).ProtocolDataOffset = size_of::<STORAGE_PROTOCOL_DATA_DESCRIPTOR>() as u32;
-        (*p).ProtocolDataLength = DATA as u32;
+        (*p).ProtocolDataLength = data as u32;
     }
 
     let mut ret = 0u32;
@@ -289,7 +312,7 @@ fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
         ((*d).ProtocolSpecificData.ProtocolDataOffset as usize,
          (*d).ProtocolSpecificData.ProtocolDataLength as usize)
     };
-    let id = buf.get(off..off + len.min(DATA))
+    let id = buf.get(off..off + len.min(data))
         .ok_or("Identify payload landed outside the buffer")?;
     if id.len() < 532 || id.iter().all(|&b| b == 0) {
         return Err("Identify Controller returned nothing".into());
