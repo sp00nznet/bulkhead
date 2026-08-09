@@ -258,8 +258,10 @@ and only writes partition entries — filesystem contents are never touched.
 ## Recovering deleted files
 
 ```powershell
-bulkhead undelete D: --to C:ecovered
-bulkhead undelete disk2 --at 116MB --to C:ecovered   # volume that will not mount
+bulkhead undelete D: --to C:
+ecovered
+bulkhead undelete disk2 --at 116MB --to C:
+ecovered   # volume that will not mount
 ```
 
 Deleting a file on NTFS clears one flag in its MFT record and marks its
@@ -273,7 +275,10 @@ platter is whatever is there **now**: those clusters were released on delete, so
 anything written since may be sitting in them. Check what you get.
 
 NTFS only. Compressed and encrypted files are not decoded, and a file whose
-record has been reused is gone for good.
+record has been reused is gone for good. A file that cannot be fully read is
+reported as PARTIAL with the amount that was readable, never padded out to its
+recorded length — a correctly-sized file of zeros looks like a success and is
+the worst thing a recovery tool can hand back.
 
 ## Design notes
 
