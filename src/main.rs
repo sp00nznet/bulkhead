@@ -6,6 +6,7 @@
 mod bitmap;
 mod gpt;
 mod media;
+mod ntfs;
 mod scan;
 mod snap;
 mod util;
@@ -656,11 +657,9 @@ fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
     // being able to put the old one back is the difference between a recovery
     // attempt and a one-way door.
     let backup = std::env::current_dir()?.join(format!("disk{disk_no}-table-backup.bin"));
-    let mut head = vec![0u8; 34 * 512];
-    disk.seek(0)?;
-    disk.read(&mut head)?;
-    std::fs::write(&backup, &head)?;
+    save_table(&disk, size, &backup)?;
     eprintln!("\n[*] existing table saved to {}", backup.display());
+    eprintln!("    put it back with:  bulkhead undo disk{disk_no} {}", backup.display());
 
     eprintln!("[!] This REPLACES the partition table on disk {disk_no} with {} entries.",
               keep.len());
@@ -718,7 +717,114 @@ fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
         "Set-Disk -Number {disk_no} -IsOffline $false -ErrorAction SilentlyContinue
          Update-Disk -Number {disk_no} -ErrorAction SilentlyContinue"
     ))?;
-    eprintln!("[+] table rebuilt. If it is wrong, restore {}", backup.display());
+    eprintln!("[+] table rebuilt. If it is wrong:  bulkhead undo disk{disk_no} {}", backup.display());
+    Ok(())
+}
+
+/// How much of each end of a disk a table backup covers. A megabyte at each
+/// end takes in the protective MBR, both GPT copies and an MBR's worth of
+/// slack, without needing to know the sector size to read it back.
+const TABLE_BACKUP: u64 = MB;
+
+fn save_table(disk: &Raw, size: u64, path: &std::path::Path) -> Res<()> {
+    let mut buf = vec![0u8; (TABLE_BACKUP * 2) as usize];
+    disk.seek(0)?;
+    disk.read(&mut buf[..TABLE_BACKUP as usize])?;
+    disk.seek(size - TABLE_BACKUP)?;
+    disk.read(&mut buf[TABLE_BACKUP as usize..])?;
+    std::fs::write(path, &buf)?;
+    Ok(())
+}
+
+/// Put a saved partition table back.
+fn cmd_undo(disk_no: u32, file: &str, yes: bool) -> Res<()> {
+    let saved = std::fs::read(file)?;
+    if saved.len() as u64 != TABLE_BACKUP * 2 {
+        return Err(format!(
+            "{file} is {} bytes; a table backup is {}", saved.len(), TABLE_BACKUP * 2
+        ).into());
+    }
+    let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
+    if sys.trim() == disk_no.to_string() {
+        return Err(format!("disk {disk_no} holds the running C:").into());
+    }
+
+    let path = format!(r"\\.\PhysicalDrive{disk_no}");
+    let size = Raw::open(&path, false).ctx("open disk")?.len()?;
+    eprintln!("\n[!] This replaces the partition table on disk {disk_no} with {file}.");
+    if !yes {
+        eprint!("    Type YES to continue: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != "YES" {
+            return Err("cancelled".into());
+        }
+    }
+
+    ps(&format!("Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"))?;
+    let w = Raw::open(&path, true).ctx("open disk for writing")?;
+    w.seek(0)?;
+    w.write_all(&saved[..TABLE_BACKUP as usize])?;
+    w.seek(size - TABLE_BACKUP)?;
+    w.write_all(&saved[TABLE_BACKUP as usize..])?;
+    drop(w);
+    ps(&format!(
+        "Set-Disk -Number {disk_no} -IsOffline $false -ErrorAction SilentlyContinue
+         Update-Disk -Number {disk_no} -ErrorAction SilentlyContinue"
+    ))?;
+    eprintln!("[+] disk {disk_no} table restored from {file}");
+    Ok(())
+}
+
+/// Recover deleted files from an NTFS volume.
+fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) -> Res<()> {
+    let (path, base) = match disk_arg(target) {
+        Some(n) => (format!(r"\\.\PhysicalDrive{n}"), at.unwrap_or(0)),
+        None => {
+            if at.is_some() {
+                return Err("--at applies to a disk, not a volume".into());
+            }
+            (format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":", 0)
+        }
+    };
+    let disk = Raw::open(&path, false).ctx("open volume")?;
+    let fs = ntfs::Ntfs::open(&disk, base)?;
+    eprintln!("[*] {path} at {}: {}-byte clusters, {} MFT records",
+              human(base), fs.cluster, fs.records());
+
+    let found = fs.deleted(limit, |n, total| {
+        eprint!("\r  {:3}%  {n} / {total} records", n * 100 / total.max(1));
+        let _ = std::io::stderr().flush();
+    });
+    eprintln!("\r  {} deleted file(s) with recoverable data          ", found.len());
+    if found.is_empty() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(out_dir)?;
+    let mut ok = 0u64;
+    let mut bytes = 0u64;
+    for (i, d) in found.iter().enumerate() {
+        // Names come from a deleted record and are not to be trusted with a
+        // path: strip anything that could climb out of the output directory.
+        let safe: String = d.name.chars()
+            .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
+            .collect();
+        let dest = std::path::Path::new(out_dir).join(format!("{:04}_{}", i, safe));
+        match fs.read_file(d) {
+            Ok(data) => {
+                std::fs::write(&dest, &data)?;
+                ok += 1;
+                bytes += data.len() as u64;
+                eprintln!("  {} ({})", safe, human(d.size));
+            }
+            Err(e) => eprintln!("  [!] {safe}: {e}"),
+        }
+    }
+    eprintln!("[+] {ok} file(s), {} written to {out_dir}", human(bytes));
+    eprintln!("    Deleted clusters are free space; anything written to this");
+    eprintln!("    volume since may be sitting in them. Check the contents.");
     Ok(())
 }
 
@@ -990,6 +1096,13 @@ bulkhead -- block-level backup and recovery for Windows
       optionally write a new table pointing at them. The scan is
       read-only; --rebuild saves the old table first.
 
+  bulkhead undo <diskN> <TABLE.bin> [--yes]
+      Put back a partition table saved by scan --rebuild.
+
+  bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>] [--limit <N>]
+      Recover deleted files from an NTFS volume. Read-only on the source.
+      --at gives the volume's byte offset when the target is a whole disk.
+
   bulkhead media <OUT.iso>
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
@@ -1002,7 +1115,7 @@ fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" | "--to" => { it.next(); }
+            "--from" | "--to" | "--at" | "--limit" => { it.next(); }
             _ if x.starts_with("--") => {}
             _ => v.push(x),
         }
@@ -1023,6 +1136,14 @@ fn main() {
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
+        ["undo", d, file] => disk_arg(d)
+            .ok_or_else(|| format!("{d:?} is not a disk").into())
+            .and_then(|n| cmd_undo(n, file, flag("--yes"))),
+        ["undelete", t] => match opt("--to") {
+            Some(dir) => cmd_undelete(t, opt("--at").and_then(parse_size), dir,
+                                      opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(10_000)),
+            None => Err("undelete needs --to <DIR>".into()),
+        },
         ["scan", d] => disk_arg(d)
             .ok_or_else(|| format!("{d:?} is not a disk").into())
             .and_then(|n| cmd_scan(n, flag("--rebuild"), flag("--yes"))),

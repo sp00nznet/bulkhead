@@ -53,6 +53,8 @@ bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
 bulkhead part list <diskN>
 bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
 bulkhead scan <diskN> [--rebuild] [--yes]
+bulkhead undo <diskN> <TABLE.bin> [--yes]
+bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead media <OUT.iso>
 ```
 
@@ -128,6 +130,8 @@ stranded behind a partition table describing the old disk.
       target is bigger. Refuses the disk hosting the running system
 - [x] `scan` / `scan --rebuild` — find filesystems whose partition table is
       gone and write a new GPT pointing at them
+- [x] `undelete` — recover deleted files from NTFS, resident and non-resident
+- [x] `undo` — put back a table saved by `scan --rebuild`
 - [ ] verify (hash the image against the source)
 - [ ] scheduling, retention, chain merge
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
@@ -250,6 +254,26 @@ managing a disk and both destroy the thing a recovery tool exists to find. A tru
 tail is gone is still found — it just loses a tie-break rather than being
 rejected outright. `--rebuild` saves the existing table to a file first,
 and only writes partition entries — filesystem contents are never touched.
+
+## Recovering deleted files
+
+```powershell
+bulkhead undelete D: --to C:ecovered
+bulkhead undelete disk2 --at 116MB --to C:ecovered   # volume that will not mount
+```
+
+Deleting a file on NTFS clears one flag in its MFT record and marks its
+clusters free. The record, the name, and the map of where the data lives all
+survive until something reuses them — which is why this works at all, and why
+it stops working the moment you keep using the volume.
+
+Read-only on the source. Small files live inside their MFT record and come back
+whole; larger ones are read back through their data runs. What comes off the
+platter is whatever is there **now**: those clusters were released on delete, so
+anything written since may be sitting in them. Check what you get.
+
+NTFS only. Compressed and encrypted files are not decoded, and a file whose
+record has been reused is gone for good.
 
 ## Design notes
 

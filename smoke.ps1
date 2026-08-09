@@ -279,6 +279,42 @@ try {
     if ($recHash -ne $srcHash) { throw "FAIL  recovered data does not match" }
 
     Write-Host "`nPASS  lost partition table rebuilt from filesystem headers" -ForegroundColor Green
+
+    # --- undelete ----------------------------------------------------------
+    # Delete a file with known contents, then get it back. hello.txt is small
+    # enough to be resident inside its MFT record; bulk.dat is not, so both the
+    # resident and the data-run paths get exercised.
+    $vol = "$($rec.DriveLetter):"
+    $gone = "$vol\deleteme.txt"
+    1..200 | ForEach-Object { "recover me $_" } | Set-Content $gone
+    $goneHash = (Get-FileHash $gone).Hash
+    $goneSize = (Get-Item $gone).Length
+    Remove-Item $gone -Force
+    Remove-Item "$vol\bulk.dat" -Force -ErrorAction SilentlyContinue
+    # Flush, or the MFT change may still be sitting in cache
+    Write-Volume -DriveLetter $rec.DriveLetter -ErrorAction SilentlyContinue | Out-Null
+    Start-Sleep -Seconds 2
+
+    $recovered = Join-Path $work 'recovered'
+    Write-Host "`n[*] bulkhead undelete $vol --to $recovered"
+    & $exe undelete $vol --to $recovered
+    if ($LASTEXITCODE -ne 0) { throw "undelete failed" }
+
+    $hit = Get-ChildItem $recovered -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -like "*deleteme.txt" -and $_.Length -eq $goneSize } |
+           Select-Object -First 1
+    if (-not $hit) {
+        Write-Host "--- recovered files ---"
+        Get-ChildItem $recovered -ErrorAction SilentlyContinue |
+            Format-Table Name, Length -AutoSize | Out-String | Write-Host
+        throw "FAIL  deleteme.txt ($goneSize bytes) was not recovered"
+    }
+    $hitHash = (Get-FileHash $hit.FullName).Hash
+    Write-Host "[*] deleted  $goneHash"
+    Write-Host "[*] recovered $hitHash  ($($hit.Name))"
+    if ($hitHash -ne $goneHash) { throw "FAIL  recovered contents differ" }
+
+    Write-Host "`nPASS  deleted file recovered byte-for-byte" -ForegroundColor Green
 }
 finally {
     Detach-All
