@@ -240,9 +240,11 @@ Two things a naive signature scan gets wrong, both handled:
 Where two candidates still claim the same ground, the best-corroborated wins,
 then the larger, and the other is reported as skipped.
 
-Rebuild only ever edits the partition table. `Clear-Disk` is deliberately not
-used anywhere in this path — Microsoft documents it as erasing all data on the
-disk, which in a recovery tool destroys the thing being recovered. A truncated volume whose
+Rebuild writes the GPT itself, and only the table's own sectors. Neither
+`Clear-Disk` nor `New-Partition` is used: the first is documented as erasing all
+data on the disk, and the second zeroes the first sectors of a partition it
+creates so stale filesystem metadata is not picked up. Both are right for
+managing a disk and both destroy the thing a recovery tool exists to find. A truncated volume whose
 tail is gone is still found — it just loses a tie-break rather than being
 rejected outright. `--rebuild` saves the existing table to a file first,
 and only writes partition entries — filesystem contents are never touched.

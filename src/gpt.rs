@@ -204,6 +204,128 @@ pub fn reseal(header: &mut [u8], array: &[u8]) {
     seal(header);
 }
 
+/// A GUID as GPT stores it: the first three fields little-endian, the last
+/// eight bytes in written order. Parses the usual `{xxxxxxxx-xxxx-...}` form.
+pub fn guid_bytes(s: &str) -> Option<[u8; 16]> {
+    let h: Vec<u8> = s.bytes().filter(|c| c.is_ascii_hexdigit()).collect();
+    if h.len() != 32 {
+        return None;
+    }
+    let n = |i: usize| -> Option<u8> {
+        let hi = (h[i] as char).to_digit(16)? as u8;
+        let lo = (h[i + 1] as char).to_digit(16)? as u8;
+        Some(hi << 4 | lo)
+    };
+    let mut raw = [0u8; 16];
+    for i in 0..16 {
+        raw[i] = n(i * 2)?;
+    }
+    let mut g = raw;
+    g[0..4].copy_from_slice(&[raw[3], raw[2], raw[1], raw[0]]);
+    g[4..6].copy_from_slice(&[raw[5], raw[4]]);
+    g[6..8].copy_from_slice(&[raw[7], raw[6]]);
+    Some(g)
+}
+
+pub struct NewPart {
+    pub type_guid: [u8; 16],
+    pub unique_guid: [u8; 16],
+    pub start_lba: u64,
+    pub end_lba: u64,
+    pub name: String,
+}
+
+pub struct Table {
+    /// Protective MBR, for LBA 0.
+    pub mbr: Vec<u8>,
+    pub primary_header: Vec<u8>,
+    pub entries: Vec<u8>,
+    pub backup_entries_lba: u64,
+    pub backup_header: Vec<u8>,
+    pub last_lba: u64,
+    pub entries_lba: u64,
+}
+
+/// Build a complete GPT from scratch.
+///
+/// Needed because the obvious shortcut is a trap: `New-Partition` zeroes the
+/// first sectors of a partition it creates, so that stale filesystem metadata
+/// is not picked up. Right for making a new partition, fatal for rebuilding a
+/// table over filesystems that are already there.
+pub fn build(
+    disk_size: u64,
+    sector: u64,
+    disk_guid: [u8; 16],
+    parts: &[NewPart],
+) -> Option<Table> {
+    const COUNT: u64 = 128;
+    const SIZE: u64 = 128;
+    if sector < 512 || disk_size < sector * 100 || parts.len() as u64 > COUNT {
+        return None;
+    }
+    let entries_sectors = (COUNT * SIZE).div_ceil(sector);
+    let last_lba = disk_size / sector - 1;
+    let entries_lba = 2;
+    let first_usable = 2 + entries_sectors;
+    let last_usable = last_lba.checked_sub(entries_sectors + 1)?;
+    if parts.iter().any(|p| p.start_lba < first_usable || p.end_lba > last_usable) {
+        return None;
+    }
+
+    let mut entries = vec![0u8; (entries_sectors * sector) as usize];
+    for (i, p) in parts.iter().enumerate() {
+        let e = &mut entries[i * SIZE as usize..(i + 1) * SIZE as usize];
+        e[0..16].copy_from_slice(&p.type_guid);
+        e[16..32].copy_from_slice(&p.unique_guid);
+        put(e, E_START, p.start_lba);
+        put(e, E_END, p.end_lba);
+        for (j, c) in p.name.encode_utf16().take(35).enumerate() {
+            e[E_NAME + j * 2..E_NAME + j * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+
+    let mut h = vec![0u8; MIN_HEADER];
+    h[..8].copy_from_slice(SIG);
+    h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+    h[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&(MIN_HEADER as u32).to_le_bytes());
+    put(&mut h, MY_LBA, 1);
+    put(&mut h, ALT_LBA, last_lba);
+    put(&mut h, FIRST_USABLE, first_usable);
+    put(&mut h, LAST_USABLE, last_usable);
+    h[56..72].copy_from_slice(&disk_guid);
+    put(&mut h, ENTRIES_LBA, entries_lba);
+    h[NUM_ENTRIES..NUM_ENTRIES + 4].copy_from_slice(&(COUNT as u32).to_le_bytes());
+    h[ENTRY_SIZE..ENTRY_SIZE + 4].copy_from_slice(&(SIZE as u32).to_le_bytes());
+    reseal(&mut h, &entries);
+
+    let backup_entries_lba = last_lba - entries_sectors;
+    let mut b = h.clone();
+    make_backup(&mut b, last_lba, backup_entries_lba);
+    reseal(&mut b, &entries);
+
+    // Protective MBR: one entry of type 0xEE covering the whole disk, so tools
+    // that only understand MBR see a full disk rather than an empty one.
+    let mut mbr = vec![0u8; sector as usize];
+    let span = last_lba.min(0xFFFF_FFFF) as u32;
+    mbr[446] = 0x00;
+    mbr[447..450].copy_from_slice(&[0x00, 0x02, 0x00]);
+    mbr[450] = 0xEE;
+    mbr[451..454].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    mbr[458..462].copy_from_slice(&span.to_le_bytes());
+    mbr[510..512].copy_from_slice(&[0x55, 0xAA]);
+
+    Some(Table {
+        mbr,
+        primary_header: h,
+        entries,
+        backup_entries_lba,
+        backup_header: b,
+        last_lba,
+        entries_lba,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +444,70 @@ mod tests {
         let mut probe = h.clone();
         probe[HEADER_CRC..HEADER_CRC + 4].fill(0);
         assert_eq!(stored, crc32(&probe), "header CRC must cover the new entry CRC");
+    }
+
+    #[test]
+    fn guid_parsing_is_mixed_endian() {
+        // the basic-data type GUID, as it appears on disk
+        let g = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
+        assert_eq!(
+            g,
+            [0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
+             0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7]
+        );
+        assert_eq!(guid_bytes("not a guid"), None);
+        assert_eq!(guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699}"), None);
+    }
+
+    #[test]
+    fn built_table_reads_back_as_written() {
+        let ty = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
+        let uq = guid_bytes("{11111111-2222-3333-4444-555555555555}").unwrap();
+        let parts = vec![
+            NewPart { type_guid: ty, unique_guid: uq, start_lba: 2048, end_lba: 200_000,
+                      name: "recovered1".into() },
+            NewPart { type_guid: ty, unique_guid: uq, start_lba: 200_001, end_lba: 400_000,
+                      name: "recovered2".into() },
+        ];
+        let disk = 1u64 << 30;
+        let t = build(disk, 512, uq, &parts).expect("should build");
+
+        // parse it back with the reader used on real disks
+        let got = entries(&t.primary_header, &t.entries);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].start_lba, 2048);
+        assert_eq!(got[0].end_lba, 200_000);
+        assert_eq!(got[0].name, "recovered1");
+        assert_eq!(got[1].start_lba, 200_001);
+
+        // both headers must self-verify and vouch for the entry array
+        for h in [&t.primary_header, &t.backup_header] {
+            assert_eq!(u32_at(h, PART_CRC) as u32, crc32(&t.entries));
+            let mut probe = h.clone();
+            probe[HEADER_CRC..HEADER_CRC + 4].fill(0);
+            assert_eq!(u32_at(h, HEADER_CRC) as u32, crc32(&probe));
+        }
+        assert_eq!(u64_at(&t.primary_header, ALT_LBA), t.last_lba);
+        assert_eq!(u64_at(&t.backup_header, MY_LBA), t.last_lba);
+        assert_eq!(u64_at(&t.backup_header, ENTRIES_LBA), t.backup_entries_lba);
+
+        // protective MBR, or MBR-only tools see an empty disk
+        assert_eq!(t.mbr[450], 0xEE);
+        assert_eq!(t.mbr[510..512], [0x55, 0xAA]);
+    }
+
+    #[test]
+    fn build_refuses_partitions_outside_the_usable_area() {
+        let ty = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
+        let mk = |start, end| vec![NewPart {
+            type_guid: ty, unique_guid: ty, start_lba: start, end_lba: end, name: String::new(),
+        }];
+        let disk = 1u64 << 30;
+        // inside the entry array
+        assert!(build(disk, 512, ty, &mk(2, 1000)).is_none());
+        // over the backup table at the end
+        assert!(build(disk, 512, ty, &mk(2048, disk / 512 - 1)).is_none());
+        assert!(build(disk, 512, ty, &mk(2048, 400_000)).is_some());
     }
 
     #[test]

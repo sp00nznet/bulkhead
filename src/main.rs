@@ -675,35 +675,62 @@ fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
         }
     }
 
-    // ponytail: New-Partition takes an explicit offset and size, so Windows
-    // writes the GPT, the protective MBR and the GUIDs. Writing a table
-    // builder here would be a lot of code to do what the OS already does.
-    //
-    // Every cmdlet here edits only the partition table. Clear-Disk is
-    // deliberately NOT used: Microsoft documents it as erasing all data on the
-    // disk, which in a recovery path destroys the exact thing being recovered.
-    // Remove-Partition drops entries; Initialize-Disk only lays down a table on
-    // a disk that has none.
-    //
-    // The MSR that Initialize-Disk inserts has to go too -- it claims 16 MB
-    // right after the header, which would collide with any recovered partition
-    // starting near the front of the disk.
-    ps(&format!(
-        "if ((Get-Disk -Number {disk_no}).PartitionStyle -eq 'RAW') {{
-             Initialize-Disk -Number {disk_no} -PartitionStyle GPT -Confirm:$false | Out-Null
-         }}
-         Get-Partition -DiskNumber {disk_no} -ErrorAction SilentlyContinue |
-             Remove-Partition -Confirm:$false -ErrorAction SilentlyContinue"
-    ))?;
+    // The table is written directly rather than through New-Partition, which
+    // zeroes the first sectors of a partition it creates so that stale
+    // filesystem metadata is not picked up. Correct for making a new
+    // partition; it destroys the filesystem this command exists to recover.
+    // Nothing below writes anywhere except the table's own sectors.
+    let sector = disk.sector_size()? as u64;
+    let mut parts = Vec::new();
     for c in &keep {
-        ps(&format!(
-            "New-Partition -DiskNumber {disk_no} -Offset {} -Size {} -GptType '{}' | Out-Null",
-            c.start_lba * 512, c.bytes(), c.gpt_type
-        )).map_err(|e| format!("failed to add {} at {}: {e}", c.fstype, human(c.start_lba * 512)))?;
+        parts.push(gpt::NewPart {
+            type_guid: gpt::guid_bytes(c.gpt_type).ok_or("bad partition type GUID")?,
+            unique_guid: new_guid()?,
+            start_lba: c.start_lba,
+            end_lba: c.end_lba(),
+            name: format!("recovered {}", c.fstype),
+        });
         eprintln!("[+] {} at {} ({})", c.fstype, human(c.start_lba * 512), human(c.bytes()));
     }
+    let table = gpt::build(size, sector, new_guid()?, &parts)
+        .ok_or("candidates do not fit a GPT on this disk")?;
+
+    drop(disk);
+    ps(&format!("Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"))?;
+    let w = Raw::open(&path, true).ctx("open disk for writing")?;
+    w.seek(0)?;
+    w.write_all(&table.mbr)?;
+    w.seek(sector)?;
+    let mut hdr = vec![0u8; sector as usize];
+    hdr[..table.primary_header.len()].copy_from_slice(&table.primary_header);
+    w.write_all(&hdr)?;
+    w.seek(table.entries_lba * sector)?;
+    w.write_all(&table.entries)?;
+    w.seek(table.backup_entries_lba * sector)?;
+    w.write_all(&table.entries)?;
+    hdr.fill(0);
+    hdr[..table.backup_header.len()].copy_from_slice(&table.backup_header);
+    w.seek(table.last_lba * sector)?;
+    w.write_all(&hdr)?;
+    drop(w);
+
+    ps(&format!(
+        "Set-Disk -Number {disk_no} -IsOffline $false -ErrorAction SilentlyContinue
+         Update-Disk -Number {disk_no} -ErrorAction SilentlyContinue"
+    ))?;
     eprintln!("[+] table rebuilt. If it is wrong, restore {}", backup.display());
     Ok(())
+}
+
+/// A fresh GUID for a disk or partition, in the byte order GPT stores.
+fn new_guid() -> Res<[u8; 16]> {
+    let g = windows::core::GUID::new()?;
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&g.data1.to_le_bytes());
+    b[4..6].copy_from_slice(&g.data2.to_le_bytes());
+    b[6..8].copy_from_slice(&g.data3.to_le_bytes());
+    b[8..16].copy_from_slice(&g.data4);
+    Ok(b)
 }
 
 /// `1048576`, `100MB`, `2GB`, `512K`. Plain numbers are bytes.
