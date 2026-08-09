@@ -253,6 +253,25 @@ try {
         Write-Host "--- root of $($rec.DriveLetter): ---"
         Get-ChildItem "$($rec.DriveLetter):\" -Force -ErrorAction SilentlyContinue |
             Format-Table Name, Length -AutoSize | Out-String | Write-Host
+
+        # Is the filesystem still on the platter, or did we destroy it?
+        # A RAW volume means Windows would not mount it; it does not say why.
+        Write-Host "--- re-scan (is the NTFS still there?) ---"
+        & $exe scan "disk$tgtDisk"
+
+        # If it is there, the remaining suspect is the volume manager holding a
+        # stale view. Detaching and reattaching forces a clean re-read.
+        Write-Host "--- detach/reattach, then look again ---"
+        Invoke-Diskpart @("select vdisk file=`"$tgt`"", "detach vdisk") -Quiet
+        Invoke-Diskpart @("select vdisk file=`"$tgt`"", "attach vdisk")
+        Start-Sleep -Seconds 4
+        Get-Disk | Where-Object { $_.Location -like "*$tgt*" } | Get-Partition |
+            Format-Table PartitionNumber, DriveLetter, Offset, Size -AutoSize |
+            Out-String | Write-Host
+        Get-Volume | Where-Object DriveLetter |
+            Format-Table DriveLetter, FileSystemLabel, FileSystem, Size -AutoSize |
+            Out-String | Write-Host
+
         throw "FAIL  $recPath never appeared"
     }
     $recHash = (Get-FileHash $recPath).Hash
