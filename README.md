@@ -56,6 +56,7 @@ bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead undo <diskN> <TABLE.bin> [--yes]
 bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
+bulkhead identify <VOL|diskN> [--at <OFFSET>]
 bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
 bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead gui
@@ -142,6 +143,7 @@ stranded behind a partition table describing the old disk.
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
 - [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE
 - [x] `ls` / `cp` — read ext2/3/4, XFS and HFS+ volumes Windows cannot mount
+- [x] `identify` — RAID/LVM/ZFS/btrfs/bcachefs membership and format recognition
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -161,9 +163,9 @@ The five things people currently pay for. Each one builds on the last:
    from a surviving MFT, `carve` works from raw signatures when there is none,
    and `bulkhead gui` fronts all of it.
 4. **Filesystem drivers** — *in progress.* `ls` and `cp` read ext2/3/4, XFS
-   and HFS+, which Windows cannot. Outstanding: member inspection for
-   multi-disk sets, APFS, btrfs, and exposing all of them as mountable volumes
-   via WinFsp.
+   and HFS+; `identify` recognises MD RAID, LVM2, ZFS, btrfs, bcachefs,
+   SquashFS, UFS2 and VMFS members. Outstanding: F2FS and UFS2 reading, APFS,
+   btrfs reading, and exposing them all as mountable volumes via WinFsp.
 5. **Certified secure erase** — ATA Secure Erase / NVMe Sanitize plus a signed
    PDF. Every lease return needs the paperwork. A weekend of work; sold for
    real money per drive.
@@ -350,6 +352,41 @@ Not yet, and refused with a clear message rather than misread: ext2/ext3
 volumes predating extents (indirect block maps), XFS files large enough to need
 b-tree forks, HFS+ forks continuing into the extents overflow file, and old HFS
 volumes with HFS+ embedded inside them. APFS and btrfs are next.
+
+## What is this disk?
+
+```powershell
+bulkhead identify disk3
+```
+
+The question you actually have when someone hands you an unlabelled drive out
+of a dead NAS. Reading a filesystem is a lot of work; recognising one — and
+recognising the RAID or volume-manager layer *underneath* it — is very little,
+and on a NAS disk that layer is the thing standing between you and any
+filesystem at all.
+
+| Recognised | Reports |
+|---|---|
+| **Linux MD RAID** | array name and UUID, level, which member this disk is, chunk size, data offset, event count |
+| **LVM2 PV** | PV UUID, volume group name, device size |
+| **ZFS** | pool name and GUID, this device's GUID, state, txg, last host |
+| **btrfs** | label, filesystem UUID, device id, how many devices the set needs |
+| **bcachefs** | label, UUID, device N of M |
+| **SquashFS** | version, inode count, compression |
+| **UFS2** | block size, last mount point, volume name |
+| **VMFS** | version and label |
+
+It probes the whole device and then every partition on it, because a NAS disk
+carries its RAID metadata on the partition rather than the disk.
+
+**Event counts and txg numbers are the point.** Members of the same array with
+different ones are out of sync, and assembling them in the wrong order is how a
+recoverable array becomes an unrecoverable one.
+
+These are identification only. ZFS, VMFS and SquashFS are not read by bulkhead
+— SquashFS contents are always compressed, and the other two are large projects
+in themselves. Assemble MD/LVM on Linux, import ZFS with `zpool`, and the
+filesystem on top is then readable here.
 
 ## Design notes
 

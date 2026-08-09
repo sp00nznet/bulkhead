@@ -8,6 +8,7 @@ mod carve;
 mod ext4;
 mod gpt;
 mod hfs;
+mod identify;
 mod gui;
 mod media;
 mod ntfs;
@@ -956,6 +957,56 @@ impl<'a> Fs<'a> {
     }
 }
 
+/// Say what a device is, and what set it belongs to.
+fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
+    let (disk, base, name) = open_target(target, at)?;
+    let size = disk.len()?;
+    eprintln!("[*] {name} ({})", human(size));
+
+    // Probe the device itself, then each partition on it. A NAS disk carries
+    // its RAID metadata on the partition, not the disk.
+    let mut spots = vec![(base, String::from("whole device"))];
+    if at.is_none() && disk_arg(target).is_some() {
+        if let Ok(t) = Table::read(&disk) {
+            for p in gpt::entries(&t.header, &t.array) {
+                spots.push((p.start_lba * t.sector, format!("partition {}", p.number)));
+            }
+        }
+    }
+
+    let mut found = 0;
+    for (off, what) in spots {
+        // Everything reads relative to this offset, so hand each probe a view
+        // that starts there rather than teaching them all about partitions.
+        let reports = identify::identify(&disk, off, size.saturating_sub(off))
+            .unwrap_or_default();
+        let fs = Fs::open(&disk, off).ok();
+        if reports.is_empty() && fs.is_none() {
+            continue;
+        }
+        eprintln!("
+{what} at {}:", human(off));
+        for r in reports {
+            eprintln!("  {}", r.kind);
+            for l in r.lines {
+                eprintln!("      {l}");
+            }
+            found += 1;
+        }
+        if let Some(f) = fs {
+            eprintln!("  {}", f.describe());
+            eprintln!("      readable: bulkhead ls {target} --at {off}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        eprintln!("
+[*] nothing recognised. If the partition table is gone, try:");
+        eprintln!("    bulkhead scan {target}");
+    }
+    Ok(())
+}
+
 /// List a directory on a filesystem Windows cannot read.
 fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
@@ -1320,6 +1371,10 @@ bulkhead -- block-level backup and recovery for Windows
       Read ext2/3/4, XFS and HFS+ volumes, which Windows cannot. PATH is inside the
       filesystem; cp takes a file or a whole directory tree.
 
+  bulkhead identify <VOL|diskN> [--at <OFFSET>]
+      Say what a disk is and what set it belongs to -- RAID member, LVM
+      or ZFS pool member, btrfs/bcachefs, SquashFS, UFS2, VMFS.
+
   bulkhead gui
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
@@ -1358,6 +1413,7 @@ fn main() {
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso),
         ["gui"] => gui::run_gui(),
+        ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
         ["ls", t] => cmd_ls(t, opt("--at").and_then(parse_size), "/"),
         ["ls", t, path] => cmd_ls(t, opt("--at").and_then(parse_size), path),
         ["cp", t, path] => match opt("--to") {
