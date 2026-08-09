@@ -328,6 +328,16 @@ const SIGNATURES: &[(&[u8], u64, Detector)] = &[
     (b"LABELONE", 0, lvm),
 ];
 
+/// Run every detector at one known offset.
+///
+/// `scan` sweeps a disk looking for these; `identify` already knows where a
+/// partition starts and only wants to know what is on it. Same detectors
+/// either way -- including the corroboration that separates a live filesystem
+/// from a header left behind by a previous one.
+pub fn probe(disk: &Raw, start: u64) -> Option<Candidate> {
+    SIGNATURES.iter().find_map(|(_, _, detect)| detect(disk, start))
+}
+
 pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
     let mut found: Vec<Candidate> = Vec::new();
     let mut seen_starts: Vec<u64> = Vec::new();

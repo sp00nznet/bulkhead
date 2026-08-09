@@ -998,20 +998,25 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         eprintln!("
 {what} at {}{}", human(off),
                   if len > 0 { format!(", {}", human(len)) } else { String::new() });
+        // Count per spot, not overall: whether this partition was recognised
+        // has nothing to do with whether an earlier one was.
+        let mut here = 0;
         for r in reports {
             eprintln!("  {}", r.kind);
             for l in r.lines {
                 eprintln!("      {l}");
             }
-            found += 1;
+            here += 1;
         }
         if let Some(f) = fs {
             eprintln!("  {}", f.describe());
             eprintln!("      readable: bulkhead ls {target} --at {off}");
-            found += 1;
-        } else if found == 0 || len > 0 {
+            here += 1;
+        }
+        if here == 0 {
             eprintln!("  nothing recognised here");
         }
+        found += here;
     }
     if found == 0 {
         eprintln!("

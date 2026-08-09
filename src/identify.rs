@@ -365,31 +365,29 @@ fn vmfs(disk: &Raw, base: u64) -> Option<Report> {
 
 // --- what Windows already handles -------------------------------------------
 
-/// Name NTFS, exFAT and FAT where they are found.
+/// Name the filesystem sitting here, using the same detectors as `scan`.
 ///
-/// bulkhead does not read these -- Windows does it better -- but saying so is
-/// the difference between "here is your ESP" and a bare "nothing recognised"
-/// on an entirely healthy disk.
-fn windows_fs(disk: &Raw, base: u64) -> Option<Report> {
-    let bs = read_at(disk, base, 0, 512)?;
-    if bs[510..512] != [0x55, 0xAA] {
+/// Not a second, simpler check: a magic number alone is not evidence. ZFS
+/// leaves the front of its label alone, so an NTFS boot sector from the disk's
+/// previous life survives underneath a perfectly healthy pool -- and a bare
+/// magic test reports that disk as NTFS. The shared detectors corroborate
+/// before believing.
+fn known_fs(disk: &Raw, base: u64) -> Option<Report> {
+    let c = crate::scan::probe(disk, base)?;
+    // LUKS and LVM have their own probes above with more to say.
+    if c.report_only {
         return None;
     }
-    let kind = if &bs[3..11] == b"NTFS    " {
-        "NTFS"
-    } else if &bs[3..11] == b"EXFAT   " {
-        "exFAT"
-    } else if &bs[0x52..0x57] == b"FAT32" {
-        "FAT32"
-    } else if matches!(&bs[0x36..0x3B], b"FAT16" | b"FAT12" | b"FAT  ") {
-        "FAT"
-    } else {
-        return None;
-    };
-    Some(Report {
-        kind: "filesystem",
-        lines: vec![format!("{kind} -- Windows reads this natively; open it in Explorer")],
-    })
+    let mut lines = vec![format!(
+        "{}{}, {}",
+        c.fstype,
+        if c.label.is_empty() { String::new() } else { format!(" {:?}", c.label) },
+        human(c.bytes())
+    )];
+    if matches!(c.fstype, "ntfs" | "exfat" | "fat") {
+        lines.push("Windows reads this natively; open it in Explorer".into());
+    }
+    Some(Report { kind: "filesystem", lines })
 }
 
 /// Everything that recognises itself on this device.
@@ -404,7 +402,7 @@ pub fn identify(disk: &Raw, base: u64, size: u64) -> Res<Vec<Report>> {
         squashfs(disk, base),
         ufs2(disk, base),
         vmfs(disk, base),
-        windows_fs(disk, base),
+        known_fs(disk, base),
     ]
     .into_iter()
     .flatten()
