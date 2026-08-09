@@ -14,6 +14,7 @@ mod scan;
 mod snap;
 mod util;
 mod vhdx;
+mod xfs;
 
 use std::ffi::c_void;
 use std::io::Write as _;
@@ -872,13 +873,82 @@ fn open_target(target: &str, at: Option<u64>) -> Res<(Raw, u64, String)> {
     }
 }
 
+/// A directory entry, whichever filesystem it came from.
+struct Entry {
+    inode: u64,
+    name: String,
+    is_dir: bool,
+}
+
+/// The filesystems Windows will not mount, behind one interface.
+///
+/// An enum rather than a trait: there are a handful of these, they are all
+/// read-only, and the methods are the same four every time.
+enum Fs<'a> {
+    Ext(ext4::Ext<'a>),
+    Xfs(xfs::Xfs<'a>),
+}
+
+impl<'a> Fs<'a> {
+    fn open(disk: &'a Raw, base: u64) -> Res<Fs<'a>> {
+        if let Ok(e) = ext4::Ext::open(disk, base) {
+            return Ok(Fs::Ext(e));
+        }
+        match xfs::Xfs::open(disk, base) {
+            Ok(x) => Ok(Fs::Xfs(x)),
+            Err(_) => Err(format!(
+                "no ext2/3/4 or XFS volume at {}.
+                     NTFS and FAT are readable by Windows itself; for those use                  Explorer, or `bulkhead undelete` for deleted files.",
+                human(base)
+            ).into()),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Fs::Ext(e) => format!("ext2/3/4, {}-byte blocks{}", e.block_size,
+                if e.label.is_empty() { String::new() } else { format!(", label {:?}", e.label) }),
+            Fs::Xfs(x) => format!("XFS, {}-byte blocks{}", x.blocksize,
+                if x.label.is_empty() { String::new() } else { format!(", label {:?}", x.label) }),
+        }
+    }
+
+    fn resolve(&self, path: &str) -> Res<(u64, bool)> {
+        match self {
+            Fs::Ext(e) => e.resolve(path),
+            Fs::Xfs(x) => x.resolve(path),
+        }
+    }
+
+    fn read_dir(&self, ino: u64) -> Res<Vec<Entry>> {
+        Ok(match self {
+            Fs::Ext(e) => e.read_dir(ino)?.into_iter()
+                .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
+            Fs::Xfs(x) => x.read_dir(ino)?.into_iter()
+                .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
+        })
+    }
+
+    fn read_file(&self, ino: u64) -> Res<Vec<u8>> {
+        match self {
+            Fs::Ext(e) => e.read_file(ino),
+            Fs::Xfs(x) => x.read_file(ino),
+        }
+    }
+
+    fn size_of(&self, ino: u64) -> Res<u64> {
+        match self {
+            Fs::Ext(e) => e.size_of(ino),
+            Fs::Xfs(x) => x.size_of(ino),
+        }
+    }
+}
+
 /// List a directory on a filesystem Windows cannot read.
 fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
-    let fs = ext4::Ext::open(&disk, base)?;
-    eprintln!("[*] {name} at {}: ext2/3/4, {}-byte blocks{}",
-              human(base), fs.block_size,
-              if fs.label.is_empty() { String::new() } else { format!(", label {:?}", fs.label) });
+    let fs = Fs::open(&disk, base)?;
+    eprintln!("[*] {name} at {}: {}", human(base), fs.describe());
 
     let (ino, is_dir) = fs.resolve(path)?;
     if !is_dir {
@@ -902,8 +972,8 @@ fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
 /// Copy a file or directory tree off a filesystem Windows cannot read.
 fn cmd_cp(target: &str, at: Option<u64>, path: &str, out_dir: &str) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
-    let fs = ext4::Ext::open(&disk, base)?;
-    eprintln!("[*] {name}: copying {path:?} to {out_dir}");
+    let fs = Fs::open(&disk, base)?;
+    eprintln!("[*] {name}: {} -- copying {path:?} to {out_dir}", fs.describe());
     std::fs::create_dir_all(out_dir)?;
 
     let (ino, is_dir) = fs.resolve(path)?;
