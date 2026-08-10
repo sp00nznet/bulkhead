@@ -32,7 +32,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
+    DISK_GEOMETRY, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
     IOCTL_DISK_GET_LENGTH_INFO,
 };
 use windows::Win32::System::IO::DeviceIoControl;
@@ -84,6 +84,13 @@ impl Raw {
             )?
         };
         Ok(Raw(h))
+    }
+
+    /// Send a control code that takes no arguments -- the volume lock family.
+    fn fsctl(&self, code: u32) -> Res<()> {
+        let mut ret = 0u32;
+        unsafe { DeviceIoControl(self.0, code, None, 0, None, 0, Some(&mut ret), None)? };
+        Ok(())
     }
 
     fn len(&self) -> Res<u64> {
@@ -542,6 +549,46 @@ fn cmd_restore(image: &str, target: &str, yes: bool) -> Res<()> {
     r
 }
 
+/// Get Windows to let go of a disk so its sectors can be written raw.
+///
+/// Sectors owned by a mounted volume cannot be written through the physical
+/// drive; the write is refused with access denied. For a fixed disk, taking it
+/// offline is enough. **Removable media cannot be taken offline at all** --
+/// card readers and USB sticks refuse it -- so there the volumes have to be
+/// locked and dismounted one at a time instead.
+///
+/// The returned handles are the lock. It lasts exactly as long as they do, so
+/// they must stay alive for the whole write.
+fn release_disk(disk: u32) -> Res<Vec<Raw>> {
+    // Allowed to fail: removable media has no offline state. The volume locks
+    // below are what actually matter there, so this is not an error.
+    let offlined = ps(&format!("Set-Disk -Number {disk} -IsOffline $true")).is_ok();
+    let _ = ps(&format!(
+        "Set-Disk -Number {disk} -IsReadOnly $false -ErrorAction SilentlyContinue"
+    ));
+
+    let letters = ps(&format!(
+        "(Get-Partition -DiskNumber {disk} -ErrorAction SilentlyContinue).DriveLetter -join ''"
+    ))?;
+    let mut held = Vec::new();
+    for c in letters.chars().filter(|c| c.is_ascii_alphabetic()) {
+        let v = Raw::open(&format!(r"\\.\{c}:"), true).ctx("open volume to lock")?;
+        // Lock first: it fails if anything else has the volume open, which is
+        // worth hearing about before a wipe rather than halfway through one.
+        v.fsctl(FSCTL_LOCK_VOLUME)
+            .map_err(|e| format!("{c}: is in use and could not be locked ({e}). \
+                                  Close anything reading it and try again"))?;
+        v.fsctl(FSCTL_DISMOUNT_VOLUME).ctx("dismount volume")?;
+        eprintln!("[*] {c}: locked and dismounted");
+        held.push(v);
+    }
+    if !offlined && held.is_empty() {
+        eprintln!("[!] the disk would not go offline and has no volumes to lock;");
+        eprintln!("    if the write is refused, something else still holds it");
+    }
+    Ok(held)
+}
+
 fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
     let src = Raw::open(&vhd.physical_path()?, false).ctx("open image")?;
     let src_size = src.len()?;
@@ -571,12 +618,7 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
         }
     }
 
-    // Offline so Windows releases any volumes it has mounted on the target;
-    // sectors owned by a mounted volume cannot be written raw.
-    ps(&format!(
-        "Set-Disk -Number {disk} -IsOffline $true
-         Set-Disk -Number {disk} -IsReadOnly $false"
-    ))?;
+    let locks = release_disk(disk)?;
 
     Region {
         src: &src, src_off: 0, dst: &dst, dst_off: 0, len: src_size,
@@ -587,6 +629,7 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
         grow_gpt(&dst, dst_size, src_size, sector)?;
     }
 
+    drop(locks);
     drop(dst);
     ps(&format!("Set-Disk -Number {disk} -IsOffline $false"))?;
     eprintln!("[+] disk {disk} restored");
@@ -1124,10 +1167,7 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
         }
     }
 
-    ps(&format!(
-        "Set-Disk -Number {n} -IsOffline $true -ErrorAction SilentlyContinue
-         Set-Disk -Number {n} -IsReadOnly $false -ErrorAction SilentlyContinue"
-    ))?;
+    let locks = release_disk(n)?;
 
     match kind {
         // The drive does the work. All we do is start it and watch.
@@ -1206,6 +1246,7 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
             bad += 1;
         }
     }
+    drop(locks);
     drop(disk);
     ps(&format!("Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"))?;
 
