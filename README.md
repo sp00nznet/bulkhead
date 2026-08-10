@@ -484,12 +484,30 @@ the drive was already empty.
 It asks for the drive's **serial number**, not a yes. A serial cannot be typed
 by reflex, and finding it means looking at which drive this really is.
 
-**An overwrite is the weaker method and is labelled as such.** A firmware
-sanitize tells the drive to erase itself, including blocks it has quietly
-remapped out of service. An overwrite can only reach what the drive currently
-maps, so on flash — SSDs, SD cards, USB sticks — wear levelling can leave old
-data in spare blocks that no write will ever land on. Firmware methods are
-detected and preferred, but issuing them is not implemented yet.
+Where the drive offers a real sanitize, that is used instead and the drive
+erases its own media:
+
+```powershell
+bulkhead erase disk1 --method ata-sanitize-crypto   # discards the key, seconds
+bulkhead erase disk1 --method ata-sanitize-block    # erases every block
+```
+
+**Overwrite is the weaker method and is labelled as such wherever it appears.**
+A firmware sanitize reaches blocks the drive has quietly remapped out of
+service over its life; an overwrite reaches only what the drive currently maps.
+On flash — SSDs, SD cards, USB sticks — wear levelling can leave old data in
+spare blocks that no write will ever land on. If a drive advertises a sanitize
+and you ask for an overwrite anyway, it says so before it starts.
+
+Verification matches the method rather than assuming one shape. An overwrite or
+a block erase has to read back blank. A crypto scramble does not and never
+will: it throws the key away, so the media still reads as dense ciphertext.
+Checking that for blankness would fail a successful erase, so what gets
+verified is that the old contents are gone — and the output says plainly that
+the key's destruction is the drive's claim, not a thing bulkhead observed.
+
+The sanitize path is written against the ACS spec but has not yet run against a
+drive. The overwrite path has.
 
 ## Design notes
 
