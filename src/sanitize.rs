@@ -34,8 +34,14 @@ const KEY_BLOCK: u64 = 0x0000_426B4572; // "BkEr"
 /// Overwrite puts its pattern in the low 32 bits and this signature above it.
 const KEY_OVERWRITE_SIG: u64 = 0x4F57 << 32; // "OW"
 
-const ATA_FLAGS_DRDY_REQUIRED: u16 = 0x01;
-const ATA_FLAGS_48BIT: u16 = 0x40;
+/// Taken from the SDK rather than written out here. 48BIT_COMMAND is bit 3,
+/// not bit 6, and getting it wrong is silent: without it the driver ignores
+/// PreviousTaskFile entirely, so a SANITIZE goes out as a 28-bit command with
+/// the high half of its key missing and the drive refuses it.
+const ATA_FLAGS_DRDY_REQUIRED: u16 =
+    windows::Win32::Storage::IscsiDisc::ATA_FLAGS_DRDY_REQUIRED as u16;
+const ATA_FLAGS_48BIT: u16 =
+    windows::Win32::Storage::IscsiDisc::ATA_FLAGS_48BIT_COMMAND as u16;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
