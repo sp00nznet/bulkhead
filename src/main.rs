@@ -5,6 +5,7 @@
 //! incrementals, and already boots one. The paid tools charge for those.
 mod bitmap;
 mod carve;
+mod cert;
 mod erase;
 mod ext4;
 mod gpt;
@@ -1064,6 +1065,27 @@ fn cmd_erase_info(target: &str) -> Res<()> {
         eprintln!("\r
 [!] erase capability unknown -- the drive did not answer");
     }
+    // Ask the drive for its sanitize status. That command changes nothing, but
+    // it rides the same pass-through, the same task-file split and the same
+    // 48-bit flag as the sanitize that erases the drive -- so if this answers,
+    // the destructive one will reach the drive too. Better to learn that here
+    // than after typing a serial number.
+    if caps.ata_sanitize {
+        match sanitize::status(&disk) {
+            Ok((true, _)) => {
+                eprintln!("[+] sanitize commands reach this drive; none in progress")
+            }
+            Ok((false, pct)) => {
+                eprintln!("[!] a sanitize is ALREADY RUNNING on this drive ({pct}%)")
+            }
+            Err(e) => {
+                eprintln!("[!] the drive advertises sanitize but would not answer a");
+                eprintln!("    status query: {e}");
+                eprintln!("    an erase would not reach it either. Usually the storage");
+                eprintln!("    driver or a USB bridge refusing to pass the command on.");
+            }
+        }
+    }
     for b in caps.blockers() {
         eprintln!("[!] {b}");
     }
@@ -1081,7 +1103,7 @@ fn cmd_erase_info(target: &str) -> Res<()> {
 /// flash -- SSDs, SD cards, USB sticks -- wear levelling means some old data
 /// can survive in spare blocks that no write will ever land on. Say so rather
 /// than implying otherwise.
-fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
+fn cmd_erase(target: &str, method: Option<&str>, yes: bool, cert_to: Option<&str>) -> Res<()> {
     let Some(n) = disk_arg(target) else {
         return Err(format!("{target:?} is not a disk; erase works on whole drives").into());
     };
@@ -1168,6 +1190,7 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
     }
 
     let locks = release_disk(n)?;
+    let started = std::time::Instant::now();
 
     match kind {
         // The drive does the work. All we do is start it and watch.
@@ -1219,9 +1242,11 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
     // the key, so the sectors still read as dense ciphertext. Checking those
     // for blankness would fail a successful erase, so the test is that the
     // bytes changed -- which is all that can honestly be observed from here.
+    let seconds = started.elapsed().as_secs();
     let crypto = kind == Some(sanitize::Kind::CryptoScramble);
     let mut bad = 0;
     let mut changed = 0;
+    let mut samples = Vec::new();
     for (i, &at) in points.iter().enumerate() {
         let mut b = vec![0u8; sector as usize];
         disk.seek(at)?;
@@ -1229,26 +1254,63 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
         if got != sector as usize {
             eprintln!("[!] {} could not be read back", human(at));
             bad += 1;
+            samples.push(cert::Point {
+                at,
+                before: hex16(&before[i]),
+                after: "unreadable".into(),
+                ok: false,
+            });
             continue;
         }
         if b != before[i] {
             changed += 1;
         }
-        if crypto {
+        let ok = if crypto {
             // Only the old contents disappearing is checkable here.
-            if b == before[i] && !erase::is_pattern(&before[i], 0) {
-                eprintln!("[!] {} is unchanged: {}", human(at), hex16(&b));
-                bad += 1;
-            }
-        } else if !erase::is_pattern(&b, 0) && !erase::is_pattern(&b, 0xFF) {
+            b != before[i] || erase::is_pattern(&before[i], 0)
+        } else {
             // 0xFF as well as 0x00: erased flash reads as ones on some drives.
-            eprintln!("[!] {} still holds data: {}", human(at), hex16(&b));
+            erase::is_pattern(&b, 0) || erase::is_pattern(&b, 0xFF)
+        };
+        if !ok {
             bad += 1;
+            if crypto {
+                eprintln!("[!] {} is unchanged: {}", human(at), hex16(&b));
+            } else {
+                eprintln!("[!] {} still holds data: {}", human(at), hex16(&b));
+            }
         }
+        samples.push(cert::Point { at, before: hex16(&before[i]), after: hex16(&b), ok });
     }
     drop(locks);
     drop(disk);
     ps(&format!("Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"))?;
+
+    // The certificate is written whether or not it passed. One that only
+    // exists on success is one that lies by omission.
+    if let Some(path) = cert_to {
+        let (host, operator) = cert::who();
+        let doc = cert::Cert {
+            when: cert::utc_now(),
+            host,
+            operator,
+            tool: concat!("bulkhead ", env!("CARGO_PKG_VERSION")).into(),
+            disk: n,
+            model: caps.model.clone(),
+            serial: caps.serial.clone(),
+            firmware: caps.firmware.clone(),
+            bus: caps.bus.map(|b| b.name()).unwrap_or("unknown".into()),
+            size,
+            method: chosen.to_string(),
+            seconds,
+            had_data,
+            points: samples,
+            passed: bad == 0,
+            caveats: erase_caveats(chosen, crypto, had_data),
+        };
+        doc.write(path)?;
+        eprintln!("[+] certificate written to {path}");
+    }
 
     if bad > 0 {
         return Err(format!("{bad} of {} sampled points did not verify", points.len()).into());
@@ -1273,6 +1335,60 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
 
 fn hex16(b: &[u8]) -> String {
     b.iter().take(16).map(|x| format!("{x:02x}")).collect()
+}
+
+/// The limits of what the run just did, in the words that go on the paper.
+///
+/// These are the same things `erase` prints. They exist twice on purpose: a
+/// certificate is read months later by someone who never saw the terminal,
+/// and the caveats are the half that decides whether the drive can leave the
+/// building.
+fn erase_caveats(method: &str, crypto: bool, had_data: bool) -> Vec<String> {
+    let mut v = vec![
+        "Verification is by sampling. Points spread across the drive were read \
+         back, including its first and last sectors; the whole surface was not \
+         re-read.".to_string(),
+    ];
+    if method == "overwrite" {
+        v.push(
+            "A host overwrite reaches only the blocks the drive currently maps. \
+             Sectors retired by the firmware over the drive's life are not \
+             reachable from outside it, and nothing observable from the host can \
+             say whether any exist."
+                .into(),
+        );
+        v.push(
+            "On flash -- SSDs, SD cards, USB sticks -- wear levelling can leave \
+             old contents in spare blocks that no write will ever land on. NIST \
+             SP 800-88 classes this as Clear, not Purge; only a firmware \
+             sanitize supports the stronger claim."
+                .into(),
+        );
+    } else {
+        v.push(
+            "The drive reported that it completed the command. That the firmware \
+             did what the command specifies is the drive's claim, not something \
+             this tool observed."
+                .into(),
+        );
+    }
+    if crypto {
+        v.push(
+            "A cryptographic erase discards the key rather than clearing the \
+             media, so the sectors still read as dense ciphertext. What is \
+             verified here is that the previous contents are gone; that the key \
+             was destroyed is the drive's claim."
+                .into(),
+        );
+    }
+    if !had_data {
+        v.push(
+            "The sampled points were already blank before the erase, so this run \
+             shows the command succeeded rather than that data was removed."
+                .into(),
+        );
+    }
+    v
 }
 
 /// Say what a device is, and what set it belongs to.
@@ -1740,9 +1856,11 @@ bulkhead -- block-level backup and recovery for Windows
       What erase commands a drive supports, and what is stopping one.
       Read-only.
 
-  bulkhead erase <diskN> --method overwrite [--yes]
+  bulkhead erase <diskN> --method overwrite [--yes] [--cert <FILE>]
       ERASE a drive. Asks for its serial number first. Overwrite cannot
       reach blocks flash has remapped; a firmware sanitize can.
+      --cert writes a certificate of erasure: .json for a machine,
+      any other extension for a printable page. Written pass or fail.
 
   bulkhead gui
       A window over the read-only operations, for people who do not
@@ -1760,7 +1878,7 @@ fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" | "--to" | "--at" | "--limit" | "--method" => { it.next(); }
+            "--from" | "--to" | "--at" | "--limit" | "--method" | "--cert" => { it.next(); }
             _ if x.starts_with("--") => {}
             _ => v.push(x),
         }
@@ -1784,7 +1902,7 @@ fn main() {
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
         ["erase-info", t] => cmd_erase_info(t),
-        ["erase", t] => cmd_erase(t, opt("--method"), flag("--yes")),
+        ["erase", t] => cmd_erase(t, opt("--method"), flag("--yes"), opt("--cert")),
         ["mount-fs", t, mp] => {
             cmd_mount_fs(t, opt("--at").and_then(parse_size), mp, flag("--debug"))
         }

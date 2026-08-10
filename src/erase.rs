@@ -31,7 +31,7 @@ pub enum Bus {
 }
 
 impl Bus {
-    fn name(self) -> String {
+    pub fn name(self) -> String {
         match self {
             Bus::Ata => "SATA/ATA".into(),
             Bus::Nvme => "NVMe".into(),

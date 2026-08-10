@@ -58,7 +58,7 @@ bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead identify <VOL|diskN> [--at <OFFSET>]
 bulkhead erase-info <diskN>
-bulkhead erase <diskN> [--method <M>] [--yes]
+bulkhead erase <diskN> [--method <M>] [--yes] [--cert <FILE>]
 bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
 bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
@@ -151,7 +151,9 @@ stranded behind a partition table describing the old disk.
 - [x] `erase-info` — what erase commands a drive supports, and what blocks them
 - [x] `erase --method overwrite` — zero every sector, then sample-verify
 - [ ] `erase` via firmware sanitize — written, never run against a drive
-- [ ] erase certificate (JSON + signed PDF)
+- [x] erase certificate (`--cert`) — JSON for a machine, a printable page for
+      a person, written whether it passed or failed
+- [ ] the certificate is unsigned: nothing ties the paper to the record
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -176,10 +178,10 @@ The five things people currently pay for. Each one builds on the last:
    btrfs reading, and exposing them all as mountable volumes via WinFsp.
 5. **Certified secure erase** — *in progress.* `erase-info` reports what a
    drive supports and what blocks it; `erase --method overwrite` wipes a drive
-   and verifies by sampling, confirmed on real hardware. The ATA SANITIZE path
-   (crypto scramble, block erase) is written but has never run against a drive.
-   Outstanding: proving sanitize on hardware, the NVMe equivalents, and the
-   certificate.
+   and verifies by sampling, confirmed on real hardware; `--cert` produces the
+   record afterwards. The ATA SANITIZE path (crypto scramble, block erase) is
+   written but has never run against a drive. Outstanding: proving sanitize on
+   hardware, the NVMe equivalents, and signing the certificate.
 
 Linux and macOS are a stretch goal. Windows first, because that's where the
 gap is.
@@ -479,6 +481,13 @@ usefully it says what is **stopping** one:
   as *unknown*, never as "this drive cannot be erased": a question that was
   never asked is not a negative answer.
 
+Where a drive advertises sanitize, `erase-info` also asks it for its sanitize
+**status**. That command changes nothing, but it rides the same pass-through,
+the same task-file split and the same 48-bit flag as the sanitize that erases
+the drive — so an answer here means the destructive command will reach the
+drive as well. Better to find that out before typing a serial number than
+after.
+
 ```powershell
 bulkhead erase disk5 --method overwrite
 ```
@@ -513,6 +522,35 @@ will: it throws the key away, so the media still reads as dense ciphertext.
 Checking that for blankness would fail a successful erase, so what gets
 verified is that the old contents are gone — and the output says plainly that
 the key's destruction is the drive's claim, not a thing bulkhead observed.
+
+### The certificate
+
+```powershell
+bulkhead erase disk5 --method overwrite --cert wipe-058F63666433.html
+bulkhead erase disk5 --method overwrite --cert wipe-058F63666433.json
+```
+
+The other half of what Blancco sells. The extension picks the form: `.json` for
+whatever consumes it next, anything else for a page that prints — drive
+identity, the method, its NIST SP 800-88 class, elapsed time, and every sample
+point with the first sixteen bytes before and after.
+
+Three things it deliberately does:
+
+- **It is written whether the erase passed or failed.** A certificate that only
+  exists on success is a certificate that lies by omission, so a failed run
+  produces one that says FAILED and marks which points did not verify.
+- **It says Clear or Purge, and means it.** SP 800-88 draws that line exactly
+  at the remapped-block problem: a host overwrite reaches what the drive maps
+  (Clear), a firmware sanitize reaches the media (Purge). Claiming Purge for an
+  overwrite is the one lie a certificate must not tell.
+- **The limits are printed on the certificate itself**, not filed in a manual —
+  that sampling is not a full read-back, that an overwrite cannot reach retired
+  sectors, and that a crypto erase's key destruction is the drive's claim. It
+  is read months later by someone who never saw the terminal.
+
+It is self-attested and unsigned: nothing cryptographically ties the printed
+page to the JSON record, and the document says so on its face.
 
 The sanitize path is written against the ACS spec but has not yet run against a
 drive. The overwrite path has: a 7.4 GB USB card reader was imaged, erased,
