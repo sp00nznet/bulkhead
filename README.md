@@ -58,6 +58,7 @@ bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead identify <VOL|diskN> [--at <OFFSET>]
 bulkhead erase-info <diskN>
+bulkhead erase <diskN> [--method <M>] [--yes]
 bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
 bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
@@ -147,6 +148,10 @@ stranded behind a partition table describing the old disk.
 - [x] `ls` / `cp` — read ext2/3/4, XFS and HFS+ volumes Windows cannot mount
 - [x] `identify` — RAID/LVM/ZFS/btrfs/bcachefs membership and format recognition
 - [x] `mount-fs` — ext4/XFS/HFS+ as a read-only Windows drive, via WinFsp
+- [x] `erase-info` — what erase commands a drive supports, and what blocks them
+- [x] `erase --method overwrite` — zero every sector, then sample-verify
+- [ ] `erase` via firmware sanitize — written, never run against a drive
+- [ ] erase certificate (JSON + signed PDF)
 - [ ] MBR disks in `part` (GPT only today)
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
@@ -170,8 +175,11 @@ The five things people currently pay for. Each one builds on the last:
    SquashFS, UFS2 and VMFS members. Outstanding: F2FS and UFS2 reading, APFS,
    btrfs reading, and exposing them all as mountable volumes via WinFsp.
 5. **Certified secure erase** — *in progress.* `erase-info` reports what a
-   drive supports and what is blocking an erase. Outstanding: issuing the
-   command, verification sampling, and the certificate.
+   drive supports and what blocks it; `erase --method overwrite` wipes a drive
+   and verifies by sampling, confirmed on real hardware. The ATA SANITIZE path
+   (crypto scramble, block erase) is written but has never run against a drive.
+   Outstanding: proving sanitize on hardware, the NVMe equivalents, and the
+   certificate.
 
 Linux and macOS are a stretch goal. Windows first, because that's where the
 gap is.
