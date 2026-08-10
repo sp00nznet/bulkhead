@@ -13,6 +13,7 @@ mod identify;
 mod gui;
 mod media;
 mod ntfs;
+mod sanitize;
 mod scan;
 mod snap;
 mod util;
@@ -1068,10 +1069,20 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
             ).into());
         }
     };
-    if chosen != "overwrite" {
+    let kind = sanitize::Kind::parse(chosen);
+    if kind.is_none() && chosen != "overwrite" {
         return Err(format!(
-            "{chosen} is not implemented yet; only --method overwrite is.
-                 This drive advertises: {}",
+            "{chosen} is not implemented yet. Available: overwrite{}{}",
+            if firmware.iter().any(|m| sanitize::Kind::parse(m).is_some()) { ", " } else { "" },
+            firmware.iter().filter(|m| sanitize::Kind::parse(m).is_some())
+                .cloned().collect::<Vec<_>>().join(", ")
+        ).into());
+    }
+    // Asking for a sanitize the drive never advertised is worth stopping on:
+    // it will be refused anyway, and a clear message beats an ATA error code.
+    if kind.is_some() && !firmware.contains(&chosen) {
+        return Err(format!(
+            "this drive does not advertise {chosen}. It advertises: {}",
             if firmware.is_empty() { "nothing".into() } else { firmware.join(", ") }
         ).into());
     }
@@ -1090,10 +1101,16 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
     eprintln!("\r
 [!] This ERASES disk {n}: {} ({}), serial {}",
               caps.model, human(size), caps.serial);
-    eprintln!("[!] Every sector is overwritten with zeros. There is no undo.");
-    if caps.bus == Some(erase::Bus::Usb) || !caps.answered {
-        eprintln!("[!] Flash media: an overwrite cannot reach blocks the drive has");
-        eprintln!("    remapped, so this is not equivalent to a firmware sanitize.");
+    match kind {
+        Some(k) => eprintln!("[!] The drive erases itself ({chosen}, {k:?}). There is no undo."),
+        None => {
+            eprintln!("[!] Every sector is overwritten with zeros. There is no undo.");
+            eprintln!("[!] An overwrite cannot reach blocks the drive has remapped out");
+            eprintln!("    of service, so it is not equivalent to a firmware sanitize.");
+            if !firmware.is_empty() {
+                eprintln!("[!] This drive DOES offer {} -- prefer that.", firmware.join(", "));
+            }
+        }
     }
     if !yes {
         // The serial, not "YES": it cannot be typed by reflex, and it forces a
@@ -1112,49 +1129,103 @@ fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
          Set-Disk -Number {n} -IsReadOnly $false -ErrorAction SilentlyContinue"
     ))?;
 
-    let zeros = vec![0u8; CHUNK];
-    let mut done = 0u64;
-    let mut last_pct = u64::MAX;
-    disk.seek(0)?;
-    while done < size {
-        let want = ((size - done) as usize).min(CHUNK);
-        disk.write_all(&zeros[..want]).ctx("overwrite")?;
-        done += want as u64;
-        let pct = done * 100 / size;
-        if pct != last_pct {
-            eprint!("\r  {pct:3}%  {} / {}", human(done), human(size));
-            let _ = std::io::stderr().flush();
-            last_pct = pct;
+    match kind {
+        // The drive does the work. All we do is start it and watch.
+        Some(k) => {
+            sanitize::start(&disk, k)?;
+            eprintln!("[*] the drive accepted the command and is erasing itself");
+            let mut last = u8::MAX;
+            loop {
+                let (done, pct) = sanitize::status(&disk)?;
+                if done {
+                    break;
+                }
+                if pct != last {
+                    eprint!("\r  {pct:3}%");
+                    let _ = std::io::stderr().flush();
+                    last = pct;
+                }
+                // ponytail: fixed poll. A crypto scramble finishes in about a
+                // second, a block erase in minutes; nothing here needs finer
+                // reporting than that.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            eprintln!("\r  100%      ");
+        }
+        None => {
+            let zeros = vec![0u8; CHUNK];
+            let mut done = 0u64;
+            let mut last_pct = u64::MAX;
+            disk.seek(0)?;
+            while done < size {
+                let want = ((size - done) as usize).min(CHUNK);
+                disk.write_all(&zeros[..want]).ctx("overwrite")?;
+                done += want as u64;
+                let pct = done * 100 / size;
+                if pct != last_pct {
+                    eprint!("\r  {pct:3}%  {} / {}", human(done), human(size));
+                    let _ = std::io::stderr().flush();
+                    last_pct = pct;
+                }
+            }
+            eprintln!("\r  100%  {} / {}      ", human(size), human(size));
         }
     }
-    eprintln!("\r  100%  {} / {}      ", human(size), human(size));
 
     // Read it back. An erase nobody checked is a claim, not a result.
+    //
+    // What counts as erased depends on the method. An overwrite or a block
+    // erase leaves the media blank. A crypto scramble does not: it throws away
+    // the key, so the sectors still read as dense ciphertext. Checking those
+    // for blankness would fail a successful erase, so the test is that the
+    // bytes changed -- which is all that can honestly be observed from here.
+    let crypto = kind == Some(sanitize::Kind::CryptoScramble);
     let mut bad = 0;
+    let mut changed = 0;
     for (i, &at) in points.iter().enumerate() {
         let mut b = vec![0u8; sector as usize];
         disk.seek(at)?;
         let got = disk.read(&mut b).unwrap_or(0);
-        if got != sector as usize || !erase::is_pattern(&b, 0) {
+        if got != sector as usize {
+            eprintln!("[!] {} could not be read back", human(at));
+            bad += 1;
+            continue;
+        }
+        if b != before[i] {
+            changed += 1;
+        }
+        if crypto {
+            // Only the old contents disappearing is checkable here.
+            if b == before[i] && !erase::is_pattern(&before[i], 0) {
+                eprintln!("[!] {} is unchanged: {}", human(at), hex16(&b));
+                bad += 1;
+            }
+        } else if !erase::is_pattern(&b, 0) && !erase::is_pattern(&b, 0xFF) {
+            // 0xFF as well as 0x00: erased flash reads as ones on some drives.
             eprintln!("[!] {} still holds data: {}", human(at), hex16(&b));
             bad += 1;
-        } else if !erase::is_pattern(&before[i], 0) {
-            // Something was there before and is not now: the strongest simple
-            // evidence the write reached the platter rather than a cache.
         }
     }
     drop(disk);
     ps(&format!("Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"))?;
 
     if bad > 0 {
-        return Err(format!("{bad} of {} sampled points still hold data", points.len()).into());
+        return Err(format!("{bad} of {} sampled points did not verify", points.len()).into());
     }
-    eprintln!("[+] {} sample points across the drive read back blank", points.len());
+    let total = points.len();
+    if crypto {
+        eprintln!("[+] {changed} of {total} sample points changed");
+        eprintln!("[*] a crypto scramble leaves ciphertext behind, not blank sectors.");
+        eprintln!("    What is verified here is that the old contents are gone; that");
+        eprintln!("    the key was destroyed is the drive's claim, not ours.");
+        return Ok(());
+    }
+    eprintln!("[+] {total} sample points across the drive read back blank");
     if had_data {
         eprintln!("[+] those points held data before, and do not now");
     } else {
         eprintln!("[*] the sampled points were already blank beforehand, so this");
-        eprintln!("    run proves the write succeeded, not that anything was removed");
+        eprintln!("    run proves the erase succeeded, not that anything was removed");
     }
     Ok(())
 }
