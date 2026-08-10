@@ -471,9 +471,25 @@ usefully it says what is **stopping** one:
   as *unknown*, never as "this drive cannot be erased": a question that was
   never asked is not a negative answer.
 
-Actually issuing the erase is not implemented yet. It destroys a drive with no
-image to restore from, and unlike everything else here it cannot be tested
-without a drive to sacrifice.
+```powershell
+bulkhead erase disk5 --method overwrite
+```
+
+Writes zeros over every sector, then reads back 32 points spread across the
+drive — including the first and last, where partition tables live — and refuses
+to claim success unless they all come back blank. It samples the same points
+*before* the write too, so it can say whether anything was actually removed or
+the drive was already empty.
+
+It asks for the drive's **serial number**, not a yes. A serial cannot be typed
+by reflex, and finding it means looking at which drive this really is.
+
+**An overwrite is the weaker method and is labelled as such.** A firmware
+sanitize tells the drive to erase itself, including blocks it has quietly
+remapped out of service. An overwrite can only reach what the drive currently
+maps, so on flash — SSDs, SD cards, USB sticks — wear levelling can leave old
+data in spare blocks that no write will ever land on. Firmware methods are
+detected and preferred, but issuing them is not implemented yet.
 
 ## Design notes
 

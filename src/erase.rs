@@ -528,3 +528,59 @@ mod tests {
         assert!(caps.blockers().iter().any(|b| b.contains("USB")));
     }
 }
+
+// --- doing it ---------------------------------------------------------------
+
+/// Spread `n` sample points across a device, always including the first and
+/// last sectors, where filesystem headers live.
+pub fn sample_points(size: u64, n: u64, sector: u64) -> Vec<u64> {
+    if size < sector || n == 0 {
+        return Vec::new();
+    }
+    let last = (size / sector - 1) * sector;
+    let mut v = vec![0u64];
+    for i in 1..n {
+        let at = (size / n) * i / sector * sector;
+        if at > 0 && at < last {
+            v.push(at);
+        }
+    }
+    v.push(last);
+    v.dedup();
+    v
+}
+
+/// Is this block entirely the byte we wrote?
+pub fn is_pattern(buf: &[u8], byte: u8) -> bool {
+    buf.iter().all(|&b| b == byte)
+}
+
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+
+    #[test]
+    fn samples_cover_both_ends() {
+        let size = 8 * 1024 * 1024 * 1024u64; // 8 GB
+        let pts = sample_points(size, 16, 512);
+        assert_eq!(pts[0], 0, "the first sector holds the partition table");
+        assert_eq!(*pts.last().unwrap(), size - 512, "and the last holds its backup");
+        assert!(pts.len() >= 3);
+        assert!(pts.windows(2).all(|w| w[0] < w[1]), "must be ordered and distinct");
+        assert!(pts.iter().all(|p| p % 512 == 0), "reads must stay sector aligned");
+    }
+
+    #[test]
+    fn samples_survive_a_tiny_device() {
+        assert!(sample_points(0, 16, 512).is_empty());
+        assert_eq!(sample_points(512, 16, 512), vec![0]);
+    }
+
+    #[test]
+    fn pattern_check_is_exact() {
+        assert!(is_pattern(&[0u8; 64], 0));
+        let mut b = [0u8; 64];
+        b[63] = 1;
+        assert!(!is_pattern(&b, 0), "one stray byte means it is not erased");
+    }
+}

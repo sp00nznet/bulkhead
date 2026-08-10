@@ -240,7 +240,7 @@ impl Region<'_> {
                     return Err(format!(
                         "{}: source ended early at {done} of {total}", self.label).into());
                 }
-                eprintln!("
+                eprintln!("\r
 [*] last {} not served by the volume driver; left zeroed",
                           human(total - done));
                 break;
@@ -1011,13 +1011,13 @@ fn cmd_erase_info(target: &str) -> Res<()> {
     }
     let methods = caps.methods();
     if !methods.is_empty() {
-        eprintln!("
+        eprintln!("\r
 [*] usable: {}", methods.join(", "));
     } else if caps.answered {
-        eprintln!("
+        eprintln!("\r
 [!] no usable erase command on this drive");
     } else {
-        eprintln!("
+        eprintln!("\r
 [!] erase capability unknown -- the drive did not answer");
     }
     for b in caps.blockers() {
@@ -1027,6 +1027,140 @@ fn cmd_erase_info(target: &str) -> Res<()> {
         eprintln!("[*] {n}");
     }
     Ok(())
+}
+
+/// Overwrite every sector of a drive, then check that it took.
+///
+/// This is the fallback, not the good option. A firmware sanitize tells the
+/// drive to erase itself, including the blocks it has quietly remapped out of
+/// service; an overwrite can only reach what the drive currently maps. On
+/// flash -- SSDs, SD cards, USB sticks -- wear levelling means some old data
+/// can survive in spare blocks that no write will ever land on. Say so rather
+/// than implying otherwise.
+fn cmd_erase(target: &str, method: Option<&str>, yes: bool) -> Res<()> {
+    let Some(n) = disk_arg(target) else {
+        return Err(format!("{target:?} is not a disk; erase works on whole drives").into());
+    };
+    let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
+    if sys.trim() == n.to_string() {
+        return Err(format!("disk {n} holds the running C:").into());
+    }
+
+    let path = format!(r"\\.\PhysicalDrive{n}");
+    let disk = Raw::open(&path, true).ctx("open disk for writing")?;
+    let size = disk.len()?;
+    let sector = disk.sector_size()? as u64;
+    let (caps, _) = erase::capabilities(&disk);
+
+    eprintln!("[*] {path}");
+    for l in erase::report(&caps) {
+        eprintln!("  {l}");
+    }
+
+    let firmware = caps.methods();
+    let chosen = match method {
+        Some(m) => m,
+        None if !firmware.is_empty() => firmware[0],
+        None => {
+            return Err(format!(
+                "no firmware erase available on this drive.
+                     Add --method overwrite to write over every sector instead,                  understanding that on flash it cannot reach remapped blocks."
+            ).into());
+        }
+    };
+    if chosen != "overwrite" {
+        return Err(format!(
+            "{chosen} is not implemented yet; only --method overwrite is.
+                 This drive advertises: {}",
+            if firmware.is_empty() { "nothing".into() } else { firmware.join(", ") }
+        ).into());
+    }
+
+    // Sample before, so afterwards there is something to compare against.
+    let points = erase::sample_points(size, 32, sector);
+    let mut before = Vec::new();
+    for &at in &points {
+        let mut b = vec![0u8; sector as usize];
+        disk.seek(at)?;
+        let _ = disk.read(&mut b);
+        before.push(b);
+    }
+    let had_data = before.iter().any(|b| !erase::is_pattern(b, 0));
+
+    eprintln!("\r
+[!] This ERASES disk {n}: {} ({}), serial {}",
+              caps.model, human(size), caps.serial);
+    eprintln!("[!] Every sector is overwritten with zeros. There is no undo.");
+    if caps.bus == Some(erase::Bus::Usb) || !caps.answered {
+        eprintln!("[!] Flash media: an overwrite cannot reach blocks the drive has");
+        eprintln!("    remapped, so this is not equivalent to a firmware sanitize.");
+    }
+    if !yes {
+        // The serial, not "YES": it cannot be typed by reflex, and it forces a
+        // look at which drive this actually is.
+        eprint!("    Type the serial ({}) to continue: ", caps.serial);
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != caps.serial.trim() {
+            return Err("cancelled".into());
+        }
+    }
+
+    ps(&format!(
+        "Set-Disk -Number {n} -IsOffline $true -ErrorAction SilentlyContinue
+         Set-Disk -Number {n} -IsReadOnly $false -ErrorAction SilentlyContinue"
+    ))?;
+
+    let zeros = vec![0u8; CHUNK];
+    let mut done = 0u64;
+    let mut last_pct = u64::MAX;
+    disk.seek(0)?;
+    while done < size {
+        let want = ((size - done) as usize).min(CHUNK);
+        disk.write_all(&zeros[..want]).ctx("overwrite")?;
+        done += want as u64;
+        let pct = done * 100 / size;
+        if pct != last_pct {
+            eprint!("\r  {pct:3}%  {} / {}", human(done), human(size));
+            let _ = std::io::stderr().flush();
+            last_pct = pct;
+        }
+    }
+    eprintln!("\r  100%  {} / {}      ", human(size), human(size));
+
+    // Read it back. An erase nobody checked is a claim, not a result.
+    let mut bad = 0;
+    for (i, &at) in points.iter().enumerate() {
+        let mut b = vec![0u8; sector as usize];
+        disk.seek(at)?;
+        let got = disk.read(&mut b).unwrap_or(0);
+        if got != sector as usize || !erase::is_pattern(&b, 0) {
+            eprintln!("[!] {} still holds data: {}", human(at), hex16(&b));
+            bad += 1;
+        } else if !erase::is_pattern(&before[i], 0) {
+            // Something was there before and is not now: the strongest simple
+            // evidence the write reached the platter rather than a cache.
+        }
+    }
+    drop(disk);
+    ps(&format!("Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"))?;
+
+    if bad > 0 {
+        return Err(format!("{bad} of {} sampled points still hold data", points.len()).into());
+    }
+    eprintln!("[+] {} sample points across the drive read back blank", points.len());
+    if had_data {
+        eprintln!("[+] those points held data before, and do not now");
+    } else {
+        eprintln!("[*] the sampled points were already blank beforehand, so this");
+        eprintln!("    run proves the write succeeded, not that anything was removed");
+    }
+    Ok(())
+}
+
+fn hex16(b: &[u8]) -> String {
+    b.iter().take(16).map(|x| format!("{x:02x}")).collect()
 }
 
 /// Say what a device is, and what set it belongs to.
@@ -1069,7 +1203,7 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         if reports.is_empty() && fs.is_none() && is_device {
             continue;
         }
-        eprintln!("
+        eprintln!("\r
 {what} at {}{}", human(off),
                   if len > 0 { format!(", {}", human(len)) } else { String::new() });
         // Count per spot, not overall: whether this partition was recognised
@@ -1093,7 +1227,7 @@ fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         found += here;
     }
     if found == 0 {
-        eprintln!("
+        eprintln!("\r
 [*] nothing recognised. If the partition table is gone, try:");
         eprintln!("    bulkhead scan {target}");
     }
@@ -1494,6 +1628,10 @@ bulkhead -- block-level backup and recovery for Windows
       What erase commands a drive supports, and what is stopping one.
       Read-only.
 
+  bulkhead erase <diskN> --method overwrite [--yes]
+      ERASE a drive. Asks for its serial number first. Overwrite cannot
+      reach blocks flash has remapped; a firmware sanitize can.
+
   bulkhead gui
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
@@ -1510,7 +1648,7 @@ fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" | "--to" | "--at" | "--limit" => { it.next(); }
+            "--from" | "--to" | "--at" | "--limit" | "--method" => { it.next(); }
             _ if x.starts_with("--") => {}
             _ => v.push(x),
         }
@@ -1534,6 +1672,7 @@ fn main() {
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
         ["erase-info", t] => cmd_erase_info(t),
+        ["erase", t] => cmd_erase(t, opt("--method"), flag("--yes")),
         ["mount-fs", t, mp] => {
             cmd_mount_fs(t, opt("--at").and_then(parse_size), mp, flag("--debug"))
         }
