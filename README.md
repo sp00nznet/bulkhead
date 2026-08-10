@@ -507,7 +507,17 @@ verified is that the old contents are gone — and the output says plainly that
 the key's destruction is the drive's claim, not a thing bulkhead observed.
 
 The sanitize path is written against the ACS spec but has not yet run against a
-drive. The overwrite path has.
+drive. The overwrite path has: a 7.4 GB USB card reader was imaged, erased,
+checked with `identify` and `scan` (both found nothing -- no table, no
+filesystem signatures anywhere on the device), then restored from the image
+with its contents intact.
+
+That test is worth describing precisely, because it proves less than it looks
+like it does. It shows the mapped sectors were blank afterwards and held data
+before. It does not show the card retains no data at all -- an overwrite cannot
+reach blocks the controller has remapped, and nothing observable from the host
+can tell you whether any exist. For flash, only a firmware sanitize makes the
+stronger claim.
 
 ## Design notes
 
