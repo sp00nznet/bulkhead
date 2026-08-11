@@ -313,8 +313,21 @@ bulkhead carve disk2 --to C:\carved
 When the MFT is gone there are no names, no sizes and no maps — only bytes.
 Most formats announce themselves with a magic number and many mark their own
 end, so a file can be lifted out whole without knowing anything about the
-filesystem that held it. Fourteen signatures: JPEG, PNG, GIF, PDF, zip (which
-covers Office and OpenDocument), MP4, SQLite, 7z, RAR, MP3, Ogg, gzip, bzip2.
+filesystem that held it. Fifteen signatures: JPEG, PNG, GIF, PDF, zip (which
+covers Office and OpenDocument), MP4, SQLite, 7z, RAR, MP3, Ogg, gzip, bzip2,
+and Outlook PST/OST.
+
+Outlook mail is the awkward one, and usually the one that matters most on a
+dead disk. It has no footer to search for and no fixed size, so there is
+nothing to find the end with — but its header states its own length outright,
+which is better than a footer: the file comes back at exactly the size it
+claims rather than padded to whatever cap the carver felt like. The header also
+carries a client signature and a format version, so a chance `!BDN` is thrown
+out instead of turning into a gigabyte of someone else's data. ANSI PSTs
+(Outlook 97–2002) keep that length somewhere else and are refused rather than
+read at the wrong offset. A carved store opens in
+[pstfree](https://github.com/sp00nznet/pstfree), which repairs the damage
+carving leaves behind.
 
 Two things it cannot do. Carved files have **no names** — only the offset they
 came from. And each is one contiguous stretch, so anything the filesystem
