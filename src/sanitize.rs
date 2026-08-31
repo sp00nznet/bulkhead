@@ -12,7 +12,9 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use windows::Win32::Storage::IscsiDisc::{ATA_PASS_THROUGH_DIRECT, IOCTL_ATA_PASS_THROUGH_DIRECT};
+use windows::Win32::Storage::IscsiDisc::{
+    IOCTL_SCSI_PASS_THROUGH_DIRECT, SCSI_PASS_THROUGH_DIRECT,
+};
 use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::util::{Ctx, Res};
@@ -34,14 +36,13 @@ const KEY_BLOCK: u64 = 0x0000_426B4572; // "BkEr"
 /// Overwrite puts its pattern in the low 32 bits and this signature above it.
 const KEY_OVERWRITE_SIG: u64 = 0x4F57 << 32; // "OW"
 
-/// Taken from the SDK rather than written out here. 48BIT_COMMAND is bit 3,
-/// not bit 6, and getting it wrong is silent: without it the driver ignores
-/// PreviousTaskFile entirely, so a SANITIZE goes out as a 28-bit command with
-/// the high half of its key missing and the drive refuses it.
-const ATA_FLAGS_DRDY_REQUIRED: u16 =
-    windows::Win32::Storage::IscsiDisc::ATA_FLAGS_DRDY_REQUIRED as u16;
-const ATA_FLAGS_48BIT: u16 =
-    windows::Win32::Storage::IscsiDisc::ATA_FLAGS_48BIT_COMMAND as u16;
+/// The SCSI opcode that carries an ATA command inside a SCSI CDB.
+const SCSI_ATA_PASS_THROUGH_16: u8 = 0x85;
+/// Protocol 3 is a non-data command -- every one of these is.
+const PROTOCOL_NON_DATA: u8 = 3;
+/// Ask the SAT layer to return the drive's registers in the sense data. Without
+/// it a refusal is invisible: the call succeeds and the drive did nothing.
+const CK_COND: u8 = 0x20;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -94,104 +95,169 @@ impl Kind {
     }
 }
 
-/// Lay a 48-bit ATA command into the two task files.
+/// Lay a 48-bit ATA command into an ATA PASS-THROUGH(16) CDB.
 ///
-/// The registers are split across "current" and "previous": the low byte of
-/// each 16-bit register goes in current, the high byte in previous. Getting
-/// that backwards sends a different command entirely, which for this command
-/// set is worth being careful about.
-pub fn task_files(feature: u16, count: u16, lba: u64, command: u8) -> ([u8; 8], [u8; 8]) {
-    let mut cur = [0u8; 8];
-    let mut prev = [0u8; 8];
-
-    cur[0] = feature as u8;
-    prev[0] = (feature >> 8) as u8;
-    cur[1] = count as u8;
-    prev[1] = (count >> 8) as u8;
-
-    cur[2] = lba as u8; // LBA 7:0
-    cur[3] = (lba >> 8) as u8; // 15:8
-    cur[4] = (lba >> 16) as u8; // 23:16
-    prev[2] = (lba >> 24) as u8; // 31:24
-    prev[3] = (lba >> 32) as u8; // 39:32
-    prev[4] = (lba >> 40) as u8; // 47:40
-
-    cur[5] = 0x40; // device: LBA mode
-    cur[6] = command;
-    (cur, prev)
+/// Each 16-bit register is split across two CDB bytes, and the halves are
+/// interleaved rather than adjacent: byte 7 is LBA(31:24) but byte 8 is
+/// LBA(7:0). Getting that wrong sends a different command entirely, which for
+/// this command set is worth being careful about.
+pub fn cdb16(feature: u16, count: u16, lba: u64, command: u8) -> [u8; 16] {
+    let mut c = [0u8; 16];
+    c[0] = SCSI_ATA_PASS_THROUGH_16;
+    c[1] = (PROTOCOL_NON_DATA << 1) | 1; // EXTEND: this is a 48-bit command
+    c[2] = CK_COND; // hand the drive's registers back in the sense data
+    c[3] = (feature >> 8) as u8;
+    c[4] = feature as u8;
+    c[5] = (count >> 8) as u8;
+    c[6] = count as u8;
+    c[7] = (lba >> 24) as u8;
+    c[8] = lba as u8;
+    c[9] = (lba >> 32) as u8;
+    c[10] = (lba >> 8) as u8;
+    c[11] = (lba >> 40) as u8;
+    c[12] = (lba >> 16) as u8;
+    c[13] = 0x40; // device: LBA mode
+    c[14] = command;
+    c
 }
 
-fn send(disk: &Raw, cur: [u8; 8], prev: [u8; 8], data: Option<&mut [u8]>, what: &str) -> Res<()> {
-    let len = data.as_ref().map(|d| d.len()).unwrap_or(0);
-    let mut apt = ATA_PASS_THROUGH_DIRECT {
-        Length: size_of::<ATA_PASS_THROUGH_DIRECT>() as u16,
-        AtaFlags: ATA_FLAGS_DRDY_REQUIRED
-            | ATA_FLAGS_48BIT
-            | if len > 0 { 0x02 } else { 0 }, // DATA_IN
-        DataTransferLength: len as u32,
-        // Generous: a block erase on a large drive can take minutes, and the
-        // command is asynchronous anyway.
-        TimeOutValue: 120,
-        DataBuffer: data.map(|d| d.as_mut_ptr() as *mut c_void).unwrap_or(std::ptr::null_mut()),
-        CurrentTaskFile: cur,
-        PreviousTaskFile: prev,
-        ..Default::default()
+/// The drive's task-file registers, as they come back from a command.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Regs {
+    pub status: u8,
+    pub error: u8,
+    pub count: u16,
+    pub lba: u64,
+}
+
+impl Regs {
+    /// The drive reports a refusal in its own registers, not by failing the
+    /// call, so a command that went through is not a command that was obeyed.
+    fn refused(&self) -> bool {
+        self.status & 0x01 != 0
+    }
+}
+
+/// Pull the ATA Status Return descriptor out of descriptor-format sense.
+///
+/// `CK_COND` asks the SAT layer for the registers; they come back as one
+/// descriptor among possibly several, so walk the list rather than assuming
+/// position.
+fn ata_regs(sense: &[u8]) -> Option<Regs> {
+    // 0x72 current, 0x73 deferred. The fixed-format codes carry no descriptors.
+    if sense.len() < 8 || (sense[0] != 0x72 && sense[0] != 0x73) {
+        return None;
+    }
+    let end = (8 + sense[7] as usize).min(sense.len());
+    let mut i = 8;
+    while i + 2 <= end {
+        let len = sense[i + 1] as usize;
+        if sense[i] == 0x09 && i + 14 <= end {
+            let d = &sense[i..i + 14];
+            return Some(Regs {
+                error: d[3],
+                count: u16::from_be_bytes([d[4], d[5]]),
+                // Same interleave as the CDB, unpicked.
+                lba: u64::from_le_bytes([d[7], d[9], d[11], d[6], d[8], d[10], 0, 0]),
+                status: d[13],
+            });
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+#[repr(C)]
+struct ScsiReq {
+    spt: SCSI_PASS_THROUGH_DIRECT,
+    sense: [u8; 32],
+}
+
+/// Send one ATA command, tunnelled through SCSI, and read the registers back.
+///
+/// Deliberately **not** `IOCTL_ATA_PASS_THROUGH_DIRECT`. Windows' `storahci`
+/// refuses SANITIZE (opcode 0xB4) on that path with ERROR_NOT_SUPPORTED,
+/// before the command ever reaches the drive -- IDENTIFY and READ VERIFY EXT
+/// go through the very same call untouched, so it is the opcode being
+/// filtered, not the request. Wrapping the identical command in a SCSI CDB and
+/// letting the driver's SAT layer unwrap it works on every drive tried, and
+/// the drive's own verdict comes back in the sense data. `examples/atprobe.rs`
+/// is the experiment that established this; keep it, it is the only thing that
+/// tells you which layer is refusing.
+fn send(disk: &Raw, cdb: [u8; 16], what: &str) -> Res<Option<Regs>> {
+    let mut req = ScsiReq {
+        spt: SCSI_PASS_THROUGH_DIRECT {
+            Length: size_of::<SCSI_PASS_THROUGH_DIRECT>() as u16,
+            CdbLength: 16,
+            SenseInfoLength: 32,
+            DataIn: 2, // SCSI_IOCTL_DATA_UNSPECIFIED: none of these carry data
+            DataTransferLength: 0,
+            // Generous: a block erase on a large drive can take minutes, and
+            // the command is asynchronous anyway.
+            TimeOutValue: 120,
+            DataBuffer: std::ptr::null_mut(),
+            SenseInfoOffset: size_of::<SCSI_PASS_THROUGH_DIRECT>() as u32,
+            Cdb: cdb,
+            ..Default::default()
+        },
+        sense: [0u8; 32],
     };
     let mut ret = 0u32;
+    let sz = size_of::<ScsiReq>() as u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_ATA_PASS_THROUGH_DIRECT,
-            Some(&mut apt as *mut _ as *mut c_void),
-            size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
-            Some(&mut apt as *mut _ as *mut c_void),
-            size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
+            disk.0, IOCTL_SCSI_PASS_THROUGH_DIRECT,
+            Some(&mut req as *mut _ as *mut c_void), sz,
+            Some(&mut req as *mut _ as *mut c_void), sz,
             Some(&mut ret), None,
         ).ctx(what)?;
     }
-    // The drive reports command failure in the status register rather than by
-    // failing the ioctl, so a successful call is not a successful command.
-    let status = apt.CurrentTaskFile[6];
-    if status & 0x01 != 0 {
-        return Err(format!("{what}: drive refused it (error register {:#04x})",
-                           apt.CurrentTaskFile[0]).into());
+    let regs = ata_regs(&req.sense);
+    if let Some(r) = regs {
+        if r.refused() {
+            return Err(format!("{what}: drive refused it (error register {:#04x})",
+                               r.error).into());
+        }
     }
-    Ok(())
+    // No descriptor is not evidence of refusal, and reporting a failure that
+    // did not happen is the worse error here: it would say a sanitize failed
+    // while the drive is busy erasing itself. `status` is the source of truth.
+    Ok(regs)
 }
 
 /// Start a sanitize. Returns as soon as the drive accepts it; the work happens
 /// afterwards and is followed with `status`.
 pub fn start(disk: &Raw, kind: Kind) -> Res<()> {
-    let (cur, prev) = task_files(kind.feature(), kind.count(), kind.lba(), CMD_SANITIZE);
-    send(disk, cur, prev, None, "SANITIZE")
+    send(disk, cdb16(kind.feature(), kind.count(), kind.lba(), CMD_SANITIZE), "SANITIZE")?;
+    Ok(())
 }
 
 /// How far along the drive is: `(finished, percent)`.
-///
-/// Progress arrives as a fraction of 65536 in the count register, and 0xFFFF
-/// means finished.
 pub fn status(disk: &Raw) -> Res<(bool, u8)> {
-    let (cur, prev) = task_files(FEAT_STATUS, 0, 0, CMD_SANITIZE);
-    let mut apt = ATA_PASS_THROUGH_DIRECT {
-        Length: size_of::<ATA_PASS_THROUGH_DIRECT>() as u16,
-        AtaFlags: ATA_FLAGS_DRDY_REQUIRED | ATA_FLAGS_48BIT,
-        TimeOutValue: 30,
-        CurrentTaskFile: cur,
-        PreviousTaskFile: prev,
-        ..Default::default()
-    };
-    let mut ret = 0u32;
-    unsafe {
-        DeviceIoControl(
-            disk.0, IOCTL_ATA_PASS_THROUGH_DIRECT,
-            Some(&mut apt as *mut _ as *mut c_void),
-            size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
-            Some(&mut apt as *mut _ as *mut c_void),
-            size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
-            Some(&mut ret), None,
-        ).ctx("SANITIZE STATUS")?;
+    let regs = send(disk, cdb16(FEAT_STATUS, 0, 0, CMD_SANITIZE), "SANITIZE STATUS")?
+        .ok_or("SANITIZE STATUS: the drive returned no registers")?;
+    Ok(progress_of(progress_word(&regs)))
+}
+
+/// Which register carries the progress word.
+///
+/// This has never been watched on a drive mid-sanitize, so the honest answer
+/// is that it is not yet known. What *has* been seen, on two drives from
+/// different vendors with nothing running, is count=0x0000 alongside the
+/// 0xFFFF "not in progress" sentinel in LBA(15:0) -- so reading only the count
+/// register, as this did before, would have sat at 0% forever and never seen
+/// the drive finish.
+///
+/// ponytail: read both and let either sentinel mean done, which is right
+/// whichever register the drive actually uses. Pin it to the one register once
+/// a real sanitize has been watched from start to finish.
+fn progress_word(r: &Regs) -> u16 {
+    let lba = r.lba as u16;
+    if r.count == 0xFFFF || lba == 0xFFFF {
+        return 0xFFFF;
     }
-    let progress = u16::from_le_bytes([apt.CurrentTaskFile[1], apt.PreviousTaskFile[1]]);
-    Ok(progress_of(progress))
+    // Whichever one is counting; the other reads zero.
+    r.count.max(lba)
 }
 
 /// Turn the raw progress word into a finished flag and a percentage.
@@ -208,23 +274,65 @@ mod tests {
 
     #[test]
     fn registers_split_low_and_high_bytes() {
-        let (cur, prev) = task_files(0x0011, 0, KEY_CRYPTO, CMD_SANITIZE);
-        assert_eq!(cur[0], 0x11, "feature low");
-        assert_eq!(prev[0], 0x00, "feature high");
-        assert_eq!(cur[6], CMD_SANITIZE);
-        assert_eq!(cur[5], 0x40, "LBA mode must be set");
-        // "Cryp" = 0x43727970, little end first across the LBA registers
-        assert_eq!([cur[2], cur[3], cur[4], prev[2]], [0x70, 0x79, 0x72, 0x43]);
+        let c = cdb16(0x0011, 0, KEY_CRYPTO, CMD_SANITIZE);
+        assert_eq!(c[0], SCSI_ATA_PASS_THROUGH_16);
+        assert_eq!(c[1] & 0x01, 1, "EXTEND: without it the high half is dropped");
+        assert_eq!((c[1] >> 1) & 0x0F, PROTOCOL_NON_DATA);
+        assert_eq!(c[2], CK_COND, "without it a refusal is invisible");
+        assert_eq!([c[3], c[4]], [0x00, 0x11], "feature high then low");
+        assert_eq!(c[14], CMD_SANITIZE);
+        assert_eq!(c[13], 0x40, "LBA mode must be set");
+        // "Cryp" = 0x43727970, interleaved across the CDB's LBA bytes:
+        // 7:0, 15:8, 23:16, 31:24
+        assert_eq!([c[8], c[10], c[12], c[7]], [0x70, 0x79, 0x72, 0x43]);
     }
 
     #[test]
     fn overwrite_carries_its_signature_above_the_pattern() {
-        let (cur, prev) = task_files(FEAT_OVERWRITE, 1, Kind::Overwrite.lba(), CMD_SANITIZE);
+        let c = cdb16(FEAT_OVERWRITE, 1, Kind::Overwrite.lba(), CMD_SANITIZE);
         // pattern in the low 32 bits, zero here
-        assert_eq!([cur[2], cur[3], cur[4], prev[2]], [0, 0, 0, 0]);
+        assert_eq!([c[8], c[10], c[12], c[7]], [0, 0, 0, 0]);
         // "OW" signature in bits 47:32
-        assert_eq!([prev[3], prev[4]], [0x57, 0x4F]);
-        assert_eq!(cur[1], 1, "one pass");
+        assert_eq!([c[9], c[11]], [0x57, 0x4F]);
+        assert_eq!([c[5], c[6]], [0, 1], "one pass");
+    }
+
+    // The two cases below are real sense buffers captured from real drives on
+    // 2026-08-31, not hand-written ones -- which is the point of keeping them.
+    #[test]
+    fn reads_the_registers_a_sanitize_capable_drive_returns() {
+        // WDC WUH721818ALE6L4, idle: no error, and the 0xFFFF "not in
+        // progress" sentinel in LBA rather than in count.
+        let sense = [0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E,
+                     0x09, 0x0C, 0x01, 0x00, 0x00, 0x00, 0x00, 0xFF,
+                     0x00, 0xFF, 0x00, 0x00, 0x00, 0x50];
+        let r = ata_regs(&sense).expect("ATA status descriptor");
+        assert_eq!(r.status, 0x50);
+        assert_eq!(r.error, 0x00);
+        assert!(!r.refused());
+        assert_eq!(r.count, 0x0000);
+        assert_eq!(r.lba as u16, 0xFFFF);
+        // Reading count alone would have called this 0% and never finished.
+        assert_eq!(progress_of(progress_word(&r)), (true, 100));
+    }
+
+    #[test]
+    fn a_drive_without_sanitize_comes_back_aborted() {
+        // Samsung PM851, which advertises no sanitize: ERR set, ABRT in the
+        // error register. The command reached the drive and the drive said no.
+        let sense = [0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E,
+                     0x09, 0x0C, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00,
+                     0x00, 0x00, 0x00, 0x00, 0xE0, 0x51];
+        let r = ata_regs(&sense).expect("ATA status descriptor");
+        assert_eq!(r.error & 0x04, 0x04, "ABRT");
+        assert!(r.refused(), "a refusal must not read as success");
+    }
+
+    #[test]
+    fn sense_without_an_ata_descriptor_is_not_a_refusal() {
+        // All-zero sense is what a command with no CK_COND returns. Treating
+        // it as failure would report a running sanitize as a failed one.
+        assert!(ata_regs(&[0u8; 32]).is_none());
     }
 
     #[test]

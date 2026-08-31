@@ -602,8 +602,21 @@ Three things it deliberately does:
 It is self-attested and unsigned: nothing cryptographically ties the printed
 page to the JSON record, and the document says so on its face.
 
-The sanitize path is written against the ACS spec but has not yet run against a
-drive. The overwrite path has: a 7.4 GB USB card reader was imaged, erased,
+The sanitize path is written against the ACS spec, and its **status** command
+now reaches real drives — but nothing has yet been *erased* with it.
+
+Getting even that far meant discovering that Windows' own `storahci` refuses
+ATA opcode 0xB4 on `IOCTL_ATA_PASS_THROUGH_DIRECT` outright, with
+ERROR_NOT_SUPPORTED, before the command reaches the drive. It is the opcode
+being filtered and not the request: `IDENTIFY` and `READ VERIFY SECTORS EXT` go
+through the very same call untouched, on the same drives. Wrapping the
+identical command in a SCSI ATA PASS-THROUGH(16) CDB and letting the driver's
+SAT layer unwrap it gets through, and the drive's own verdict comes back in the
+sense data — so that is what `sanitize.rs` does. `examples/atprobe.rs` is the
+experiment that established it, kept in the tree because it is the only thing
+that tells you *which layer* is refusing a command.
+
+The overwrite path has run: a 7.4 GB USB card reader was imaged, erased,
 checked with `identify` and `scan` (both found nothing -- no table, no
 filesystem signatures anywhere on the device), then restored from the image
 with its contents intact.
