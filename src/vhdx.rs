@@ -1,16 +1,25 @@
+// These parameter blocks are Win32 unions: the fields being set live inside
+// `Anonymous.Version2`, and writing that as a struct literal means naming the
+// union variant by hand. The sequence below is what the API documentation
+// shows, and it leaves room for the comment explaining the block size.
+#![allow(clippy::field_reassign_with_default)]
+
 //! Thin wrapper over the Windows VirtDisk API. Windows already implements
 //! VHDX: dynamic allocation, differencing chains, and mount-as-a-drive. We
 //! just call it.
-use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::Vhd::*;
+use windows::core::{GUID, PCWSTR, PWSTR};
 
-use crate::util::{wide, Ctx, Res};
+use crate::util::{Ctx, Res, wide};
 
 const VENDOR_MSFT: GUID = GUID::from_u128(0xec984aec_a0f9_47e9_901f_71415a66345b);
 
 fn vhdx_type() -> VIRTUAL_STORAGE_TYPE {
-    VIRTUAL_STORAGE_TYPE { DeviceId: VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VendorId: VENDOR_MSFT }
+    VIRTUAL_STORAGE_TYPE {
+        DeviceId: VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
+        VendorId: VENDOR_MSFT,
+    }
 }
 
 /// An open VirtDisk handle. Detach-on-drop is deliberately NOT done: `image`
@@ -20,7 +29,9 @@ pub struct Vhd(pub HANDLE);
 
 impl Drop for Vhd {
     fn drop(&mut self) {
-        unsafe { let _ = CloseHandle(self.0); }
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
     }
 }
 
@@ -42,9 +53,18 @@ impl Vhd {
         let mut h = HANDLE::default();
         unsafe {
             CreateVirtualDisk(
-                &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE, None,
-                CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
-            ).ok().ctx("CreateVirtualDisk")?;
+                &vhdx_type(),
+                PCWSTR(w.as_ptr()),
+                VIRTUAL_DISK_ACCESS_NONE,
+                None,
+                CREATE_VIRTUAL_DISK_FLAG_NONE,
+                0,
+                &p,
+                None,
+                &mut h,
+            )
+            .ok()
+            .ctx("CreateVirtualDisk")?;
         }
         drop(Vhd(h));
         Ok(())
@@ -62,9 +82,18 @@ impl Vhd {
         let mut h = HANDLE::default();
         unsafe {
             CreateVirtualDisk(
-                &vhdx_type(), PCWSTR(w.as_ptr()), VIRTUAL_DISK_ACCESS_NONE, None,
-                CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &p, None, &mut h,
-            ).ok().ctx("CreateVirtualDisk (differencing)")?;
+                &vhdx_type(),
+                PCWSTR(w.as_ptr()),
+                VIRTUAL_DISK_ACCESS_NONE,
+                None,
+                CREATE_VIRTUAL_DISK_FLAG_NONE,
+                0,
+                &p,
+                None,
+                &mut h,
+            )
+            .ok()
+            .ctx("CreateVirtualDisk (differencing)")?;
         }
         drop(Vhd(h));
         Ok(())
@@ -91,9 +120,15 @@ impl Vhd {
         let mut h = HANDLE::default();
         unsafe {
             OpenVirtualDisk(
-                &vhdx_type(), PCWSTR(w.as_ptr()), access,
-                OPEN_VIRTUAL_DISK_FLAG_NONE, Some(&p), &mut h,
-            ).ok().ctx("OpenVirtualDisk")?;
+                &vhdx_type(),
+                PCWSTR(w.as_ptr()),
+                access,
+                OPEN_VIRTUAL_DISK_FLAG_NONE,
+                Some(&p),
+                &mut h,
+            )
+            .ok()
+            .ctx("OpenVirtualDisk")?;
         }
         Ok(Vhd(h))
     }
@@ -102,17 +137,31 @@ impl Vhd {
     /// while imaging); `permanent` keeps the disk attached after we exit.
     pub fn attach(&self, read_only: bool, letter: bool, permanent: bool) -> Res<()> {
         let mut flags = ATTACH_VIRTUAL_DISK_FLAG_NONE;
-        if read_only { flags |= ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY; }
-        if !letter { flags |= ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER; }
-        if permanent { flags |= ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME; }
+        if read_only {
+            flags |= ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY;
+        }
+        if !letter {
+            flags |= ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER;
+        }
+        if permanent {
+            flags |= ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME;
+        }
         let mut p = ATTACH_VIRTUAL_DISK_PARAMETERS::default();
         p.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
-        unsafe { AttachVirtualDisk(self.0, None, flags, 0, Some(&p), None).ok().ctx("AttachVirtualDisk")?; }
+        unsafe {
+            AttachVirtualDisk(self.0, None, flags, 0, Some(&p), None)
+                .ok()
+                .ctx("AttachVirtualDisk")?;
+        }
         Ok(())
     }
 
     pub fn detach(&self) -> Res<()> {
-        unsafe { DetachVirtualDisk(self.0, DETACH_VIRTUAL_DISK_FLAG_NONE, 0).ok().ctx("DetachVirtualDisk")?; }
+        unsafe {
+            DetachVirtualDisk(self.0, DETACH_VIRTUAL_DISK_FLAG_NONE, 0)
+                .ok()
+                .ctx("DetachVirtualDisk")?;
+        }
         Ok(())
     }
 
@@ -120,7 +169,11 @@ impl Vhd {
     pub fn physical_path(&self) -> Res<String> {
         let mut buf = [0u16; 260];
         let mut len = (buf.len() * 2) as u32;
-        unsafe { GetVirtualDiskPhysicalPath(self.0, &mut len, PWSTR(buf.as_mut_ptr())).ok().ctx("GetVirtualDiskPhysicalPath")?; }
+        unsafe {
+            GetVirtualDiskPhysicalPath(self.0, &mut len, PWSTR(buf.as_mut_ptr()))
+                .ok()
+                .ctx("GetVirtualDiskPhysicalPath")?;
+        }
         let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         Ok(String::from_utf16_lossy(&buf[..n]))
     }

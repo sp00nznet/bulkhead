@@ -11,14 +11,14 @@ use std::ffi::c_void;
 use std::mem::size_of;
 
 use windows::Win32::Storage::IscsiDisc::{ATA_PASS_THROUGH_DIRECT, IOCTL_ATA_PASS_THROUGH_DIRECT};
-use windows::Win32::System::Ioctl::{
-    STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR, STORAGE_PROTOCOL_SPECIFIC_DATA,
-    STORAGE_PROTOCOL_TYPE, IOCTL_STORAGE_QUERY_PROPERTY,
-};
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::{
+    IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR,
+    STORAGE_PROTOCOL_SPECIFIC_DATA, STORAGE_PROTOCOL_TYPE,
+};
 
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 /// How the drive is attached. Which erase commands exist depends on it, and a
 /// USB bridge usually hides all of them.
@@ -113,16 +113,20 @@ impl Caps {
     pub fn blockers(&self) -> Vec<String> {
         let mut v = Vec::new();
         if self.bus == Some(Bus::Usb) {
-            v.push("attached over USB: bridges rarely pass these commands through, \
+            v.push(
+                "attached over USB: bridges rarely pass these commands through, \
                     and a bridge that half-implements them can report success \
                     without erasing anything. Connect it directly."
-                .into());
+                    .into(),
+            );
         }
         if self.ata_security && self.ata_frozen && !self.ata_sanitize {
-            v.push("security state is FROZEN: the firmware locks it at boot. \
+            v.push(
+                "security state is FROZEN: the firmware locks it at boot. \
                     Suspend and resume the machine, or hot-plug the drive, then \
                     check again."
-                .into());
+                    .into(),
+            );
         }
         if self.ata_security_enabled {
             v.push("an ATA password is already set; it must be known to erase".into());
@@ -131,7 +135,10 @@ impl Caps {
             // One line per sentence: a `\` continuation inside a string keeps
             // whatever indentation follows it, and this message has already
             // been printed with forty spaces in the middle of it once.
-            v.push("the drive did not answer a capability query, so nothing here is known either way".into());
+            v.push(
+                "the drive did not answer a capability query, so nothing here is known either way"
+                    .into(),
+            );
             v.push("  its storage driver may not pass these through; Intel RST and VMD commonly do not".into());
             v.push("  switching the controller to standard AHCI/NVMe, or attaching the drive elsewhere, makes it answerable".into());
         } else if self.methods().is_empty() {
@@ -157,19 +164,25 @@ fn ata_string(b: &[u8], first: usize, words: usize) -> String {
 
 /// StorageDeviceProperty: model, serial and how the drive is attached.
 fn device_property(disk: &Raw, caps: &mut Caps) -> Res<()> {
-    let mut query = STORAGE_PROPERTY_QUERY::default();
-    query.PropertyId = windows::Win32::System::Ioctl::StorageDeviceProperty;
-    query.QueryType = windows::Win32::System::Ioctl::PropertyStandardQuery;
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: windows::Win32::System::Ioctl::StorageDeviceProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
+        ..Default::default()
+    };
     let mut buf = vec![0u8; 4096];
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_STORAGE_QUERY_PROPERTY,
+            disk.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
             Some(&query as *const _ as *const c_void),
             size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
-            Some(&mut ret), None,
-        ).ctx("IOCTL_STORAGE_QUERY_PROPERTY")?;
+            Some(buf.as_mut_ptr() as *mut c_void),
+            buf.len() as u32,
+            Some(&mut ret),
+            None,
+        )
+        .ctx("IOCTL_STORAGE_QUERY_PROPERTY")?;
     }
     // STORAGE_DEVICE_DESCRIPTOR: offsets into the same buffer, or 0 if absent.
     let at = |off: usize| -> String {
@@ -216,13 +229,16 @@ fn ata_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_ATA_PASS_THROUGH_DIRECT,
+            disk.0,
+            IOCTL_ATA_PASS_THROUGH_DIRECT,
             Some(&mut apt as *mut _ as *mut c_void),
             size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
             Some(&mut apt as *mut _ as *mut c_void),
             size_of::<ATA_PASS_THROUGH_DIRECT>() as u32,
-            Some(&mut ret), None,
-        ).ctx("ATA IDENTIFY")?;
+            Some(&mut ret),
+            None,
+        )
+        .ctx("ATA IDENTIFY")?;
     }
     if data.iter().all(|&b| b == 0) {
         return Err("IDENTIFY returned nothing".into());
@@ -285,9 +301,11 @@ fn nvme_identify(disk: &Raw, caps: &mut Caps) -> Res<()> {
 }
 
 fn nvme_identify_via(
-    disk: &Raw, caps: &mut Caps,
+    disk: &Raw,
+    caps: &mut Caps,
     property: windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID,
-    head: usize, data_len: usize,
+    head: usize,
+    data_len: usize,
 ) -> Res<()> {
     const IDENTIFY_CONTROLLER: u32 = 1;
     let data = data_len;
@@ -310,21 +328,29 @@ fn nvme_identify_via(
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(buf.as_ptr() as *const c_void), buf.len() as u32,
-            Some(buf.as_mut_ptr() as *mut c_void), buf.len() as u32,
-            Some(&mut ret), None,
-        ).ctx("NVMe Identify via StorageAdapterProtocolSpecificProperty")?;
+            disk.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(buf.as_ptr() as *const c_void),
+            buf.len() as u32,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            buf.len() as u32,
+            Some(&mut ret),
+            None,
+        )
+        .ctx("NVMe Identify via StorageAdapterProtocolSpecificProperty")?;
     }
 
     // The reply is a descriptor whose ProtocolSpecificData says where the
     // payload landed.
     let (off, len) = unsafe {
         let d = buf.as_ptr() as *const STORAGE_PROTOCOL_DATA_DESCRIPTOR;
-        ((*d).ProtocolSpecificData.ProtocolDataOffset as usize,
-         (*d).ProtocolSpecificData.ProtocolDataLength as usize)
+        (
+            (*d).ProtocolSpecificData.ProtocolDataOffset as usize,
+            (*d).ProtocolSpecificData.ProtocolDataLength as usize,
+        )
     };
-    let id = buf.get(off..off + len.min(data))
+    let id = buf
+        .get(off..off + len.min(data))
         .ok_or("Identify payload landed outside the buffer")?;
     if id.len() < 532 || id.iter().all(|&b| b == 0) {
         return Err("Identify Controller returned nothing".into());
@@ -382,13 +408,24 @@ pub fn report(caps: &Caps) -> Vec<String> {
         format!("model    {}", caps.model),
         format!("serial   {}", caps.serial),
         format!("firmware {}", caps.firmware),
-        format!("bus      {}", caps.bus.map(|b| b.name()).unwrap_or("unknown".into())),
+        format!(
+            "bus      {}",
+            caps.bus.map(|b| b.name()).unwrap_or("unknown".into())
+        ),
     ];
     if caps.ata_security {
         v.push(format!(
             "ATA security: supported, {}{}",
-            if caps.ata_frozen { "FROZEN" } else { "not frozen" },
-            if caps.ata_security_enabled { ", password set" } else { "" }
+            if caps.ata_frozen {
+                "FROZEN"
+            } else {
+                "not frozen"
+            },
+            if caps.ata_security_enabled {
+                ", password set"
+            } else {
+                ""
+            }
         ));
         if let Some((normal, enhanced)) = caps.ata_erase_minutes {
             v.push(format!(
@@ -403,18 +440,34 @@ pub fn report(caps: &Caps) -> Vec<String> {
     }
     if caps.ata_sanitize {
         let mut kinds = Vec::new();
-        if caps.ata_sanitize_crypto { kinds.push("crypto"); }
-        if caps.ata_sanitize_block { kinds.push("block"); }
-        if caps.ata_sanitize_overwrite { kinds.push("overwrite"); }
+        if caps.ata_sanitize_crypto {
+            kinds.push("crypto");
+        }
+        if caps.ata_sanitize_block {
+            kinds.push("block");
+        }
+        if caps.ata_sanitize_overwrite {
+            kinds.push("overwrite");
+        }
         v.push(format!("ATA sanitize: {}", kinds.join(", ")));
     }
     if caps.nvme_format || caps.nvme_sanitize_crypto || caps.nvme_sanitize_block {
         let mut kinds = Vec::new();
-        if caps.nvme_format { kinds.push("format"); }
-        if caps.nvme_crypto_erase { kinds.push("format-crypto"); }
-        if caps.nvme_sanitize_crypto { kinds.push("sanitize-crypto"); }
-        if caps.nvme_sanitize_block { kinds.push("sanitize-block"); }
-        if caps.nvme_sanitize_overwrite { kinds.push("sanitize-overwrite"); }
+        if caps.nvme_format {
+            kinds.push("format");
+        }
+        if caps.nvme_crypto_erase {
+            kinds.push("format-crypto");
+        }
+        if caps.nvme_sanitize_crypto {
+            kinds.push("sanitize-crypto");
+        }
+        if caps.nvme_sanitize_block {
+            kinds.push("sanitize-block");
+        }
+        if caps.nvme_sanitize_overwrite {
+            kinds.push("sanitize-overwrite");
+        }
         v.push(format!("NVMe: {}", kinds.join(", ")));
     }
     v
@@ -440,10 +493,7 @@ mod tests {
         assert_eq!(ata_string(&b, 27, 6), "WDC WD40EFRX");
         // read with the swap ignored and it comes out scrambled, which is the
         // failure this guards against
-        assert_ne!(
-            String::from_utf8_lossy(&b[54..66]).trim(),
-            "WDC WD40EFRX"
-        );
+        assert_ne!(String::from_utf8_lossy(&b[54..66]).trim(), "WDC WD40EFRX");
     }
 
     #[test]
@@ -462,11 +512,18 @@ mod tests {
 
     #[test]
     fn a_frozen_drive_reports_why_it_cannot_erase() {
-        let caps = Caps { ata_security: true, ata_frozen: true, answered: true,
-            ..Default::default() };
+        let caps = Caps {
+            ata_security: true,
+            ata_frozen: true,
+            answered: true,
+            ..Default::default()
+        };
         assert!(caps.methods().is_empty(), "a frozen drive offers nothing");
         let why = caps.blockers().join(" ");
-        assert!(why.contains("FROZEN"), "must say what to do about it: {why}");
+        assert!(
+            why.contains("FROZEN"),
+            "must say what to do about it: {why}"
+        );
     }
 
     #[test]
@@ -507,14 +564,28 @@ mod tests {
         // A drive behind a controller that will not pass these through tells
         // us nothing. Reporting that as "no erase command" states something
         // about the drive that was never established.
-        let silent = Caps { answered: false, ..Default::default() };
+        let silent = Caps {
+            answered: false,
+            ..Default::default()
+        };
         let why = silent.blockers().join(" ");
-        assert!(why.contains("did not answer"), "must not claim the drive said no: {why}");
+        assert!(
+            why.contains("did not answer"),
+            "must not claim the drive said no: {why}"
+        );
         assert!(!why.contains("reports no usable erase command"));
 
         // A drive that did answer, with nothing to offer, is a real negative.
-        let answered = Caps { answered: true, ..Default::default() };
-        assert!(answered.blockers().iter().any(|b| b.contains("reports no usable")));
+        let answered = Caps {
+            answered: true,
+            ..Default::default()
+        };
+        assert!(
+            answered
+                .blockers()
+                .iter()
+                .any(|b| b.contains("reports no usable"))
+        );
     }
 
     #[test]
@@ -564,10 +635,20 @@ mod erase_tests {
         let size = 8 * 1024 * 1024 * 1024u64; // 8 GB
         let pts = sample_points(size, 16, 512);
         assert_eq!(pts[0], 0, "the first sector holds the partition table");
-        assert_eq!(*pts.last().unwrap(), size - 512, "and the last holds its backup");
+        assert_eq!(
+            *pts.last().unwrap(),
+            size - 512,
+            "and the last holds its backup"
+        );
         assert!(pts.len() >= 3);
-        assert!(pts.windows(2).all(|w| w[0] < w[1]), "must be ordered and distinct");
-        assert!(pts.iter().all(|p| p % 512 == 0), "reads must stay sector aligned");
+        assert!(
+            pts.windows(2).all(|w| w[0] < w[1]),
+            "must be ordered and distinct"
+        );
+        assert!(
+            pts.iter().all(|p| p % 512 == 0),
+            "reads must stay sector aligned"
+        );
     }
 
     #[test]

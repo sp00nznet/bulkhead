@@ -32,15 +32,26 @@ pub fn ps(script: &str) -> Res<String> {
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()?;
     if !out.status.success() {
-        return Err(format!("powershell failed: {}", String::from_utf8_lossy(&out.stderr).trim()).into());
+        return Err(format!(
+            "powershell failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 pub fn human(b: u64) -> String {
-    const U: [(&str, u64); 4] = [("TB", 1 << 40), ("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)];
+    const U: [(&str, u64); 4] = [
+        ("TB", 1 << 40),
+        ("GB", 1 << 30),
+        ("MB", 1 << 20),
+        ("KB", 1 << 10),
+    ];
     for (n, d) in U {
-        if b >= d { return format!("{:.1} {}", b as f64 / d as f64, n); }
+        if b >= d {
+            return format!("{:.1} {}", b as f64 / d as f64, n);
+        }
     }
     format!("{b} B")
 }

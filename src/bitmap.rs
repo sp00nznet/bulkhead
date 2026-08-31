@@ -6,10 +6,10 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use windows::core::HRESULT;
 use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
-use windows::Win32::System::Ioctl::{FSCTL_GET_VOLUME_BITMAP, STARTING_LCN_INPUT_BUFFER};
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::{FSCTL_GET_VOLUME_BITMAP, STARTING_LCN_INPUT_BUFFER};
+use windows::core::HRESULT;
 
 use crate::util::Res;
 
@@ -31,11 +31,11 @@ impl Bitmap {
     /// map is a reason to copy, never a reason to skip.
     pub fn any_allocated(&self, start: u64, end: u64) -> bool {
         let first = start / self.cluster;
-        let last = (end + self.cluster - 1) / self.cluster;
+        let last = end.div_ceil(self.cluster);
         (first..last).any(|c| {
             self.bits
                 .get((c / 8) as usize)
-                .map_or(true, |b| b & (1 << (c % 8)) != 0)
+                .is_none_or(|b| b & (1 << (c % 8)) != 0)
         })
     }
 }
@@ -56,11 +56,14 @@ pub fn read(h: HANDLE, vol_size: u64) -> Res<Option<Bitmap>> {
         let mut ret = 0u32;
         let r = unsafe {
             DeviceIoControl(
-                h, FSCTL_GET_VOLUME_BITMAP,
+                h,
+                FSCTL_GET_VOLUME_BITMAP,
                 Some(&input as *const _ as *const c_void),
                 size_of::<STARTING_LCN_INPUT_BUFFER>() as u32,
-                Some(out.as_mut_ptr() as *mut c_void), OUT as u32,
-                Some(&mut ret), None,
+                Some(out.as_mut_ptr() as *mut c_void),
+                OUT as u32,
+                Some(&mut ret),
+                None,
             )
         };
         // ERROR_MORE_DATA is the normal "here is a page of it" answer, not a
@@ -102,7 +105,12 @@ pub fn read(h: HANDLE, vol_size: u64) -> Res<Option<Bitmap>> {
     }
 
     let allocated = bits.iter().map(|b| b.count_ones() as u64).sum();
-    Ok(Some(Bitmap { cluster, clusters: total as u64, allocated, bits }))
+    Ok(Some(Bitmap {
+        cluster,
+        clusters: total as u64,
+        allocated,
+        bits,
+    }))
 }
 
 #[cfg(test)]
@@ -110,7 +118,12 @@ mod tests {
     use super::*;
 
     fn bm(bits: Vec<u8>, cluster: u64, clusters: u64) -> Bitmap {
-        Bitmap { cluster, clusters, allocated: 0, bits }
+        Bitmap {
+            cluster,
+            clusters,
+            allocated: 0,
+            bits,
+        }
     }
 
     #[test]

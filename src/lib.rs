@@ -17,10 +17,10 @@ mod cert;
 mod erase;
 mod ext4;
 mod gpt;
+pub mod gui;
 mod hfs;
 mod identify;
 mod mbr;
-pub mod gui;
 pub mod media;
 mod ntfs;
 mod sanitize;
@@ -35,21 +35,21 @@ use std::ffi::c_void;
 use std::io::Write as _;
 use std::mem::size_of;
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
-    IOCTL_DISK_GET_LENGTH_INFO,
+    CreateFileW, FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING, ReadFile, SetFilePointerEx, WriteFile,
 };
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::{
+    DISK_GEOMETRY, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, GET_LENGTH_INFORMATION,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO,
+};
+use windows::core::PCWSTR;
 
 use bitmap::Bitmap;
 use snap::Snapshot;
-use util::{human, ps, wide, Ctx, Res};
+use util::{Ctx, Res, human, ps, wide};
 use vhdx::Vhd;
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -79,18 +79,29 @@ struct Raw(HANDLE);
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        unsafe { let _ = CloseHandle(self.0); }
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
     }
 }
 
 impl Raw {
     fn open(path: &str, write: bool) -> Res<Raw> {
         let w = wide(path);
-        let access = if write { GENERIC_READ | GENERIC_WRITE } else { GENERIC_READ };
+        let access = if write {
+            GENERIC_READ | GENERIC_WRITE
+        } else {
+            GENERIC_READ
+        };
         let h = unsafe {
             CreateFileW(
-                PCWSTR(w.as_ptr()), access, FILE_SHARE_READ | FILE_SHARE_WRITE, None,
-                OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None,
+                PCWSTR(w.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
             )?
         };
         Ok(Raw(h))
@@ -108,9 +119,14 @@ impl Raw {
         let mut ret = 0u32;
         let ioctl = unsafe {
             DeviceIoControl(
-                self.0, IOCTL_DISK_GET_LENGTH_INFO, None, 0,
+                self.0,
+                IOCTL_DISK_GET_LENGTH_INFO,
+                None,
+                0,
                 Some(&mut li as *mut _ as *mut c_void),
-                size_of::<GET_LENGTH_INFORMATION>() as u32, Some(&mut ret), None,
+                size_of::<GET_LENGTH_INFORMATION>() as u32,
+                Some(&mut ret),
+                None,
             )
         };
         if ioctl.is_ok() {
@@ -132,22 +148,32 @@ impl Raw {
         let mut ret = 0u32;
         unsafe {
             DeviceIoControl(
-                self.0, IOCTL_DISK_GET_DRIVE_GEOMETRY, None, 0,
+                self.0,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY,
+                None,
+                0,
                 Some(&mut g as *mut _ as *mut c_void),
-                size_of::<DISK_GEOMETRY>() as u32, Some(&mut ret), None,
-            ).ctx("IOCTL_DISK_GET_DRIVE_GEOMETRY")?;
+                size_of::<DISK_GEOMETRY>() as u32,
+                Some(&mut ret),
+                None,
+            )
+            .ctx("IOCTL_DISK_GET_DRIVE_GEOMETRY")?;
         }
         Ok(g.BytesPerSector)
     }
 
     fn seek(&self, off: u64) -> Res<()> {
-        unsafe { SetFilePointerEx(self.0, off as i64, None, FILE_BEGIN).ctx("seek")?; }
+        unsafe {
+            SetFilePointerEx(self.0, off as i64, None, FILE_BEGIN).ctx("seek")?;
+        }
         Ok(())
     }
 
     fn read(&self, buf: &mut [u8]) -> Res<usize> {
         let mut n = 0u32;
-        unsafe { ReadFile(self.0, Some(buf), Some(&mut n), None).ctx("read")?; }
+        unsafe {
+            ReadFile(self.0, Some(buf), Some(&mut n), None).ctx("read")?;
+        }
         Ok(n as usize)
     }
 
@@ -155,8 +181,12 @@ impl Raw {
         let mut done = 0usize;
         while done < buf.len() {
             let mut n = 0u32;
-            unsafe { WriteFile(self.0, Some(&buf[done..]), Some(&mut n), None).ctx("write")?; }
-            if n == 0 { return Err("short write to target".into()); }
+            unsafe {
+                WriteFile(self.0, Some(&buf[done..]), Some(&mut n), None).ctx("write")?;
+            }
+            if n == 0 {
+                return Err("short write to target".into());
+            }
             done += n as usize;
         }
         Ok(())
@@ -181,10 +211,15 @@ fn diff_runs(old: &[u8], new: &[u8], grain: usize) -> Vec<(usize, usize)> {
         let differs = !at_end && (old.len() < e || old[i..e] != new[i..e]);
         match (differs, start) {
             (true, None) => start = Some(i),
-            (false, Some(s)) => { runs.push((s, i)); start = None; }
+            (false, Some(s)) => {
+                runs.push((s, i));
+                start = None;
+            }
             _ => {}
         }
-        if at_end { break; }
+        if at_end {
+            break;
+        }
         i = e;
     }
     runs
@@ -220,7 +255,11 @@ impl Region<'_> {
     fn run(&self) -> Res<()> {
         let total = self.len;
         let mut buf = vec![0u8; CHUNK];
-        let mut old = if self.delta { vec![0u8; CHUNK] } else { Vec::new() };
+        let mut old = if self.delta {
+            vec![0u8; CHUNK]
+        } else {
+            Vec::new()
+        };
         let (mut done, mut written, mut skipped) = (0u64, 0u64, 0u64);
         let mut short = 0u64;
         let mut last_pct = u64::MAX;
@@ -239,7 +278,10 @@ impl Region<'_> {
             // reading it, which is where the time goes on a mostly-empty disk.
             // ponytail: whole chunks only, so free space in runs shorter than
             // 4 MiB is still copied. Drop to GRAIN if that shows up.
-            if self.alloc.is_some_and(|b| !b.any_allocated(done, done + want as u64)) {
+            if self
+                .alloc
+                .is_some_and(|b| !b.any_allocated(done, done + want as u64))
+            {
                 done += want as u64;
                 skipped += want as u64;
                 continue;
@@ -255,12 +297,15 @@ impl Region<'_> {
                 // the tail only; anywhere else a zero read is a truncated
                 // image and must not pass silently.
                 if total - done > self.tail_slack {
-                    return Err(format!(
-                        "{}: source ended early at {done} of {total}", self.label).into());
+                    return Err(
+                        format!("{}: source ended early at {done} of {total}", self.label).into(),
+                    );
                 }
-                eprintln!("\r
+                eprintln!(
+                    "\r
 [*] last {} not served by the volume driver; left zeroed",
-                          human(total - done));
+                    human(total - done)
+                );
                 break;
             }
 
@@ -279,7 +324,9 @@ impl Region<'_> {
 
             let cmp: &[u8] = if compare { &old[..n] } else { &[] };
             for (s, e) in diff_runs(cmp, &buf[..n], GRAIN) {
-                self.dst.seek(self.dst_off + done + s as u64).ctx("target")?;
+                self.dst
+                    .seek(self.dst_off + done + s as u64)
+                    .ctx("target")?;
                 self.dst.write_all(&buf[s..e]).ctx("target")?;
                 written += (e - s) as u64;
             }
@@ -288,8 +335,12 @@ impl Region<'_> {
         }
         eprintln!("\r  100%  {} / {}      ", human(done), human(total));
         if let Some(b) = self.alloc {
-            eprintln!("    {} free space skipped ({} of {} clusters in use)",
-                      human(skipped), b.allocated, b.clusters);
+            eprintln!(
+                "    {} free space skipped ({} of {} clusters in use)",
+                human(skipped),
+                b.allocated,
+                b.clusters
+            );
         }
         if self.delta {
             eprintln!("    {} changed", human(written));
@@ -301,14 +352,16 @@ impl Region<'_> {
     }
 }
 
-
 /// `disk0`, `0`, or `\\.\PhysicalDrive0` -- anything else is a volume.
 pub fn disk_arg(s: &str) -> Option<u32> {
     let t = s.to_ascii_lowercase();
-    let d = t.strip_prefix(r"\\.\physicaldrive")
+    let d = t
+        .strip_prefix(r"\\.\physicaldrive")
         .or_else(|| t.strip_prefix("disk"))
         .unwrap_or(&t);
-    if d.is_empty() { return None; }
+    if d.is_empty() {
+        return None;
+    }
     d.parse().ok()
 }
 
@@ -327,11 +380,16 @@ fn partitions(disk: u32) -> Res<Vec<Part>> {
     let mut v = Vec::new();
     for line in out.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 2 { continue; }
+        if f.len() < 2 {
+            continue;
+        }
         v.push(Part {
             offset: f[0].parse()?,
             size: f[1].parse()?,
-            letter: f.get(2).and_then(|s| s.chars().next()).filter(|c| c.is_ascii_alphabetic()),
+            letter: f
+                .get(2)
+                .and_then(|s| s.chars().next())
+                .filter(|c| c.is_ascii_alphabetic()),
         });
     }
     Ok(v)
@@ -349,7 +407,10 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
     let phys = Raw::open(&phys_path, false).ctx("open source disk")?;
     let disk_size = phys.len()?;
     let sector = phys.sector_size()?;
-    eprintln!("[*] source {phys_path} ({}, {sector}-byte sectors)", human(disk_size));
+    eprintln!(
+        "[*] source {phys_path} ({}, {sector}-byte sectors)",
+        human(disk_size)
+    );
 
     let parts = partitions(disk)?;
     if parts.is_empty() {
@@ -368,8 +429,10 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
                 // Not a failure worth stopping for: an unsnapshottable volume
                 // is copied raw, which is exactly right for the FAT and
                 // removable volumes VSS declines.
-                Err(e) => eprintln!("[!] {l}: {e}
-    copying it raw instead"),
+                Err(e) => eprintln!(
+                    "[!] {l}: {e}
+    copying it raw instead"
+                ),
             }
         }
     }
@@ -384,10 +447,20 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
     r
 }
 
-fn image_disk_inner(phys: &Raw, disk_size: u64, sector: u32, parts: &[Part],
-                    shadows: &[(usize, Snapshot)], out: &str, parent: Option<&str>) -> Res<()> {
+fn image_disk_inner(
+    phys: &Raw,
+    disk_size: u64,
+    sector: u32,
+    parts: &[Part],
+    shadows: &[(usize, Snapshot)],
+    out: &str,
+    parent: Option<&str>,
+) -> Res<()> {
     match parent {
-        Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)?; }
+        Some(p) => {
+            eprintln!("[*] incremental against {p}");
+            Vhd::create_diff(out, p)?;
+        }
         None => Vhd::create(out, disk_size, sector)?,
     }
     let vhd = Vhd::open(out, true)?;
@@ -403,8 +476,18 @@ fn image_disk_inner(phys: &Raw, disk_size: u64, sector: u32, parts: &[Part],
     let delta = parent.is_some();
 
     let raw = |off: u64, len: u64, label: &str| -> Res<()> {
-        Region { src: phys, src_off: off, dst: &dst, dst_off: off, len,
-                 delta, alloc: None, tail_slack: 0, label }.run()
+        Region {
+            src: phys,
+            src_off: off,
+            dst: &dst,
+            dst_off: off,
+            len,
+            delta,
+            alloc: None,
+            tail_slack: 0,
+            label,
+        }
+        .run()
     };
 
     let mut pos = 0u64;
@@ -418,9 +501,18 @@ fn image_disk_inner(phys: &Raw, disk_size: u64, sector: u32, parts: &[Part],
                 let vol_size = src.len()?.min(p.size);
                 let alloc = bitmap::read(src.0, vol_size)?;
                 let label = format!("partition {} ({}:)", i + 1, p.letter.unwrap_or('?'));
-                Region { src: &src, src_off: 0, dst: &dst, dst_off: p.offset, len: vol_size,
-                         delta, alloc: alloc.as_ref(), tail_slack: TAIL_SLACK,
-                         label: &label }.run()?;
+                Region {
+                    src: &src,
+                    src_off: 0,
+                    dst: &dst,
+                    dst_off: p.offset,
+                    len: vol_size,
+                    delta,
+                    alloc: alloc.as_ref(),
+                    tail_slack: TAIL_SLACK,
+                    label: &label,
+                }
+                .run()?;
             }
             None => raw(p.offset, p.size, &format!("partition {} (raw)", i + 1))?,
         }
@@ -434,8 +526,10 @@ fn image_disk_inner(phys: &Raw, disk_size: u64, sector: u32, parts: &[Part],
 
     drop(dst);
     vhd.detach()?;
-    eprintln!("[+] {out}
-    mount it:  bulkhead mount {out}");
+    eprintln!(
+        "[+] {out}
+    mount it:  bulkhead mount {out}"
+    );
     Ok(())
 }
 
@@ -453,12 +547,19 @@ pub fn cmd_image(volume: &str, out: &str, use_vss: bool, parent: Option<&str>) -
     // already a raw path.
     let src_path = match &shadow {
         Some(s) => s.device.clone(),
-        None => format!(r"\\.\{}", volume.trim_end_matches('\\').trim_end_matches(':')) + ":",
+        None => {
+            format!(
+                r"\\.\{}",
+                volume.trim_end_matches('\\').trim_end_matches(':')
+            ) + ":"
+        }
     };
     let r = image_inner(&src_path, out, parent);
     if let Some(s) = &shadow {
         eprintln!("[*] releasing snapshot");
-        if let Err(e) = s.delete() { eprintln!("[!] snapshot {} not released: {e}", s.id); }
+        if let Err(e) = s.delete() {
+            eprintln!("[!] snapshot {} not released: {e}", s.id);
+        }
     }
     r
 }
@@ -472,17 +573,24 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     // not offer a bitmap, and we image every sector instead.
     let alloc = bitmap::read(src.0, vol_size)?;
     match &alloc {
-        Some(b) => eprintln!("[*] {} in use of {} ({}-byte clusters)",
-                             human(b.allocated * b.cluster), human(vol_size), b.cluster),
+        Some(b) => eprintln!(
+            "[*] {} in use of {} ({}-byte clusters)",
+            human(b.allocated * b.cluster),
+            human(vol_size),
+            b.cluster
+        ),
         None => eprintln!("[*] no allocation bitmap; imaging every sector"),
     }
 
     // Slack for 1 MiB alignment, the backup GPT at the tail, and the Microsoft
     // Reserved partition Initialize-Disk inserts (16 MiB under 16 GB, 32 MiB
     // over). Over-reserving is free: the VHDX is dynamic.
-    let disk_size = (vol_size + 40 * MB + MB - 1) / MB * MB;
+    let disk_size = (vol_size + 40 * MB).div_ceil(MB) * MB;
     match parent {
-        Some(p) => { eprintln!("[*] incremental against {p}"); Vhd::create_diff(out, p)?; }
+        Some(p) => {
+            eprintln!("[*] incremental against {p}");
+            Vhd::create_diff(out, p)?;
+        }
         // Synthetic single-partition disk we lay out ourselves, so 512.
         None => Vhd::create(out, disk_size, 512)?,
     }
@@ -494,18 +602,27 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     // it would orphan the parent's data. Only a full image lays down a new one.
     // ponytail: Windows partitions its own disks correctly; see util::ps.
     let offset: u64 = if parent.is_some() {
-        ps(&format!("(Get-Partition -DiskNumber {disk} | Where-Object GptType -eq '{DATA_GUID}').Offset"))?
+        ps(&format!(
+            "(Get-Partition -DiskNumber {disk} | Where-Object GptType -eq '{DATA_GUID}').Offset"
+        ))?
     } else {
         ps(&format!(
             "Initialize-Disk -Number {disk} -PartitionStyle GPT -Confirm:$false | Out-Null
              (New-Partition -DiskNumber {disk} -UseMaximumSize -GptType '{DATA_GUID}').Offset"
         ))?
-    }.parse()?;
+    }
+    .parse()?;
     let part_size = ps(&format!(
         "(Get-Partition -DiskNumber {disk} | Where-Object Offset -eq {offset}).Size"
-    ))?.parse::<u64>()?;
+    ))?
+    .parse::<u64>()?;
     if part_size < vol_size {
-        return Err(format!("partition {} < volume {}", human(part_size), human(vol_size)).into());
+        return Err(format!(
+            "partition {} < volume {}",
+            human(part_size),
+            human(vol_size)
+        )
+        .into());
     }
 
     // A differencing disk inherits the parent's filesystem, not just its
@@ -518,13 +635,23 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
          Set-Disk -Number {disk} -IsReadOnly $false"
     ))?;
 
-    eprintln!("[*] disk {disk} partition at offset {offset} ({})", human(part_size));
+    eprintln!(
+        "[*] disk {disk} partition at offset {offset} ({})",
+        human(part_size)
+    );
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
     Region {
-        src: &src, src_off: 0, dst: &dst, dst_off: offset, len: vol_size,
-        delta: parent.is_some(), alloc: alloc.as_ref(), tail_slack: TAIL_SLACK,
+        src: &src,
+        src_off: 0,
+        dst: &dst,
+        dst_off: offset,
+        len: vol_size,
+        delta: parent.is_some(),
+        alloc: alloc.as_ref(),
+        tail_slack: TAIL_SLACK,
         label: "volume",
-    }.run()?;
+    }
+    .run()?;
     drop(dst);
 
     vhd.detach()?;
@@ -542,14 +669,16 @@ pub fn cmd_restore(image: &str, target: &str, yes: bool) -> Res<()> {
         return Err(format!(
             "{target:?} is not a disk. restore writes a whole disk (e.g. disk2).\n    \
              For individual files, mount the image and copy them out."
-        ).into());
+        )
+        .into());
     };
 
     let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
     if sys.trim() == disk.to_string() {
         return Err(format!(
             "disk {disk} holds the running C:. Boot the recovery media and restore from there."
-        ).into());
+        )
+        .into());
     }
 
     let vhd = Vhd::open(image, false)?;
@@ -585,9 +714,12 @@ fn release_disk(disk: u32) -> Res<Vec<Raw>> {
         let v = Raw::open(&format!(r"\\.\{c}:"), true).ctx("open volume to lock")?;
         // Lock first: it fails if anything else has the volume open, which is
         // worth hearing about before a wipe rather than halfway through one.
-        v.fsctl(FSCTL_LOCK_VOLUME)
-            .map_err(|e| format!("{c}: is in use and could not be locked ({e}). \
-                                  Close anything reading it and try again"))?;
+        v.fsctl(FSCTL_LOCK_VOLUME).map_err(|e| {
+            format!(
+                "{c}: is in use and could not be locked ({e}). \
+                                  Close anything reading it and try again"
+            )
+        })?;
         v.fsctl(FSCTL_DISMOUNT_VOLUME).ctx("dismount volume")?;
         eprintln!("[*] {c}: locked and dismounted");
         held.push(v);
@@ -609,15 +741,25 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
     let sector = dst.sector_size()? as u64;
     if dst_size < src_size {
         return Err(format!(
-            "target is {} but the image needs {}", human(dst_size), human(src_size)
-        ).into());
+            "target is {} but the image needs {}",
+            human(dst_size),
+            human(src_size)
+        )
+        .into());
     }
 
     let desc = ps(&format!(
         "Get-Disk -Number {disk} | ForEach-Object {{ \"$($_.FriendlyName) -- $($_.PartitionStyle)\" }}"
     ))?;
-    eprintln!("\n[!] This ERASES disk {disk}: {} ({})", desc.trim(), human(dst_size));
-    eprintln!("[!] Restoring {} from the image. There is no undo.", human(src_size));
+    eprintln!(
+        "\n[!] This ERASES disk {disk}: {} ({})",
+        desc.trim(),
+        human(dst_size)
+    );
+    eprintln!(
+        "[!] Restoring {} from the image. There is no undo.",
+        human(src_size)
+    );
     if !yes {
         eprint!("    Type YES to continue: ");
         let _ = std::io::stderr().flush();
@@ -631,9 +773,17 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
     let locks = release_disk(disk)?;
 
     Region {
-        src: &src, src_off: 0, dst: &dst, dst_off: 0, len: src_size,
-        delta: false, alloc: None, tail_slack: 0, label: "disk",
-    }.run()?;
+        src: &src,
+        src_off: 0,
+        dst: &dst,
+        dst_off: 0,
+        len: src_size,
+        delta: false,
+        alloc: None,
+        tail_slack: 0,
+        label: "disk",
+    }
+    .run()?;
 
     if dst_size > src_size {
         grow_gpt(&dst, dst_size, src_size, sector)?;
@@ -678,8 +828,11 @@ fn grow_gpt(dst: &Raw, dst_size: u64, src_size: u64, sector: u64) -> Res<()> {
     dst.seek(f.last_lba * sector)?;
     dst.write_all(&sec)?;
 
-    eprintln!("[*] GPT extended to {}; {} now unpartitioned and usable",
-              human(dst_size), human(dst_size - src_size));
+    eprintln!(
+        "[*] GPT extended to {}; {} now unpartitioned and usable",
+        human(dst_size),
+        human(dst_size - src_size)
+    );
     Ok(())
 }
 
@@ -699,24 +852,38 @@ pub fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
     let (keep, dropped) = scan::resolve(&found);
     eprintln!("\n{} candidate(s):", found.len());
     for c in &found {
-        let mark = if c.report_only { "report-only" }
-            else if keep.iter().any(|k| k.start_lba == c.start_lba) { "use" }
-            else { "overlaps, skipped" };
-        eprintln!("  {:>12}  {:>10}  {:<6} {:<20} [{}]",
-                  human(c.start_lba * 512), human(c.bytes()), c.fstype, c.label, mark);
+        let mark = if c.report_only {
+            "report-only"
+        } else if keep.iter().any(|k| k.start_lba == c.start_lba) {
+            "use"
+        } else {
+            "overlaps, skipped"
+        };
+        eprintln!(
+            "  {:>12}  {:>10}  {:<6} {:<20} [{}]",
+            human(c.start_lba * 512),
+            human(c.bytes()),
+            c.fstype,
+            c.label,
+            mark
+        );
         if !c.note.is_empty() {
             eprintln!("               {}", c.note);
         }
     }
     if !dropped.is_empty() {
-        eprintln!("\n[*] {} candidate(s) overlap something larger and were skipped.",
-                  dropped.len());
+        eprintln!(
+            "\n[*] {} candidate(s) overlap something larger and were skipped.",
+            dropped.len()
+        );
         eprintln!("    Those are usually ghosts of an earlier layout.");
     }
 
     if !rebuild {
-        eprintln!("\n[*] read-only. Add --rebuild to write a partition table for the {} kept.",
-                  keep.len());
+        eprintln!(
+            "\n[*] read-only. Add --rebuild to write a partition table for the {} kept.",
+            keep.len()
+        );
         return Ok(());
     }
     if keep.is_empty() {
@@ -734,10 +901,15 @@ pub fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
     let backup = std::env::current_dir()?.join(format!("disk{disk_no}-table-backup.bin"));
     save_table(&disk, size, &backup)?;
     eprintln!("\n[*] existing table saved to {}", backup.display());
-    eprintln!("    put it back with:  bulkhead undo disk{disk_no} {}", backup.display());
+    eprintln!(
+        "    put it back with:  bulkhead undo disk{disk_no} {}",
+        backup.display()
+    );
 
-    eprintln!("[!] This REPLACES the partition table on disk {disk_no} with {} entries.",
-              keep.len());
+    eprintln!(
+        "[!] This REPLACES the partition table on disk {disk_no} with {} entries.",
+        keep.len()
+    );
     eprintln!("[!] Filesystem contents are not touched, only the table.");
     if !yes {
         eprint!("    Type YES to continue: ");
@@ -764,13 +936,20 @@ pub fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
             end_lba: c.end_lba(),
             name: format!("recovered {}", c.fstype),
         });
-        eprintln!("[+] {} at {} ({})", c.fstype, human(c.start_lba * 512), human(c.bytes()));
+        eprintln!(
+            "[+] {} at {} ({})",
+            c.fstype,
+            human(c.start_lba * 512),
+            human(c.bytes())
+        );
     }
     let table = gpt::build(size, sector, new_guid()?, &parts)
         .ok_or("candidates do not fit a GPT on this disk")?;
 
     drop(disk);
-    ps(&format!("Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"))?;
+    ps(&format!(
+        "Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"
+    ))?;
     let w = Raw::open(&path, true).ctx("open disk for writing")?;
     w.seek(0)?;
     w.write_all(&table.mbr)?;
@@ -792,7 +971,10 @@ pub fn cmd_scan(disk_no: u32, rebuild: bool, yes: bool) -> Res<()> {
         "Set-Disk -Number {disk_no} -IsOffline $false -ErrorAction SilentlyContinue
          Update-Disk -Number {disk_no} -ErrorAction SilentlyContinue"
     ))?;
-    eprintln!("[+] table rebuilt. If it is wrong:  bulkhead undo disk{disk_no} {}", backup.display());
+    eprintln!(
+        "[+] table rebuilt. If it is wrong:  bulkhead undo disk{disk_no} {}",
+        backup.display()
+    );
     Ok(())
 }
 
@@ -816,8 +998,11 @@ pub fn cmd_undo(disk_no: u32, file: &str, yes: bool) -> Res<()> {
     let saved = std::fs::read(file)?;
     if saved.len() as u64 != TABLE_BACKUP * 2 {
         return Err(format!(
-            "{file} is {} bytes; a table backup is {}", saved.len(), TABLE_BACKUP * 2
-        ).into());
+            "{file} is {} bytes; a table backup is {}",
+            saved.len(),
+            TABLE_BACKUP * 2
+        )
+        .into());
     }
     let sys = ps("(Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber")?;
     if sys.trim() == disk_no.to_string() {
@@ -837,7 +1022,9 @@ pub fn cmd_undo(disk_no: u32, file: &str, yes: bool) -> Res<()> {
         }
     }
 
-    ps(&format!("Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"))?;
+    ps(&format!(
+        "Set-Disk -Number {disk_no} -IsOffline $true -ErrorAction SilentlyContinue"
+    ))?;
     let w = Raw::open(&path, true).ctx("open disk for writing")?;
     w.seek(0)?;
     w.write_all(&saved[..TABLE_BACKUP as usize])?;
@@ -860,19 +1047,32 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
             if at.is_some() {
                 return Err("--at applies to a disk, not a volume".into());
             }
-            (format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":", 0)
+            (
+                format!(
+                    r"\\.\{}",
+                    target.trim_end_matches('\\').trim_end_matches(':')
+                ) + ":",
+                0,
+            )
         }
     };
     let disk = Raw::open(&path, false).ctx("open volume")?;
     let fs = ntfs::Ntfs::open(&disk, base)?;
-    eprintln!("[*] {path} at {}: {}-byte clusters, {} MFT records",
-              human(base), fs.cluster, fs.records());
+    eprintln!(
+        "[*] {path} at {}: {}-byte clusters, {} MFT records",
+        human(base),
+        fs.cluster,
+        fs.records()
+    );
 
     let found = fs.deleted(limit, |n, total| {
         eprint!("\r  {:3}%  {n} / {total} records", n * 100 / total.max(1));
         let _ = std::io::stderr().flush();
     });
-    eprintln!("\r  {} deleted file(s) with recoverable data          ", found.len());
+    eprintln!(
+        "\r  {} deleted file(s) with recoverable data          ",
+        found.len()
+    );
     if found.is_empty() {
         return Ok(());
     }
@@ -883,7 +1083,9 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
     for (i, d) in found.iter().enumerate() {
         // Names come from a deleted record and are not to be trusted with a
         // path: strip anything that could climb out of the output directory.
-        let safe: String = d.name.chars()
+        let safe: String = d
+            .name
+            .chars()
             .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
             .collect();
         let dest = std::path::Path::new(out_dir).join(format!("{:04}_{}", i, safe));
@@ -893,9 +1095,16 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
                 std::fs::write(&dest, &data)?;
                 ok += 1;
                 bytes += data.len() as u64;
-                eprintln!("  {} ({}){}", safe, human(d.size),
-                          if partial { format!(" -- PARTIAL, only {} readable", human(data.len() as u64)) }
-                          else { String::new() });
+                eprintln!(
+                    "  {} ({}){}",
+                    safe,
+                    human(d.size),
+                    if partial {
+                        format!(" -- PARTIAL, only {} readable", human(data.len() as u64))
+                    } else {
+                        String::new()
+                    }
+                );
             }
             Err(e) => eprintln!("  [!] {safe}: {e}"),
         }
@@ -910,7 +1119,12 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
 pub fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
     let path = match disk_arg(target) {
         Some(n) => format!(r"\\.\PhysicalDrive{n}"),
-        None => format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":",
+        None => {
+            format!(
+                r"\\.\{}",
+                target.trim_end_matches('\\').trim_end_matches(':')
+            ) + ":"
+        }
     };
     let disk = Raw::open(&path, false).ctx("open source")?;
     let size = disk.len()?;
@@ -940,7 +1154,10 @@ fn open_target(target: &str, at: Option<u64>) -> Res<(Raw, u64, String)> {
             Ok((d, at.unwrap_or(0), p))
         }
         None => {
-            let p = format!(r"\\.\{}", target.trim_end_matches('\\').trim_end_matches(':')) + ":";
+            let p = format!(
+                r"\\.\{}",
+                target.trim_end_matches('\\').trim_end_matches(':')
+            ) + ":";
             let d = Raw::open(&p, false).ctx("open volume")?;
             Ok((d, 0, p))
         }
@@ -984,13 +1201,33 @@ impl<'a> Fs<'a> {
 
     fn describe(&self) -> String {
         match self {
-            Fs::Ext(e) => format!("ext2/3/4, {}{}", human(e.blocks * e.block_size),
-                if e.label.is_empty() { String::new() } else { format!(", label {:?}", e.label) }),
-            Fs::Xfs(x) => format!("XFS, {}{}", human(x.blocks * x.blocksize),
-                if x.label.is_empty() { String::new() } else { format!(", label {:?}", x.label) }),
-            Fs::Hfs(h) => format!("HFS+{}, {}",
-                if h.case_sensitive { "X (case-sensitive)" } else { "" },
-                human(h.blocks as u64 * h.block_size)),
+            Fs::Ext(e) => format!(
+                "ext2/3/4, {}{}",
+                human(e.blocks * e.block_size),
+                if e.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(", label {:?}", e.label)
+                }
+            ),
+            Fs::Xfs(x) => format!(
+                "XFS, {}{}",
+                human(x.blocks * x.blocksize),
+                if x.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(", label {:?}", x.label)
+                }
+            ),
+            Fs::Hfs(h) => format!(
+                "HFS+{}, {}",
+                if h.case_sensitive {
+                    "X (case-sensitive)"
+                } else {
+                    ""
+                },
+                human(h.blocks as u64 * h.block_size)
+            ),
         }
     }
 
@@ -1004,12 +1241,33 @@ impl<'a> Fs<'a> {
 
     fn read_dir(&self, ino: u64) -> Res<Vec<Entry>> {
         Ok(match self {
-            Fs::Ext(e) => e.read_dir(ino)?.into_iter()
-                .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
-            Fs::Xfs(x) => x.read_dir(ino)?.into_iter()
-                .map(|d| Entry { inode: d.inode, name: d.name, is_dir: d.is_dir }).collect(),
-            Fs::Hfs(h) => h.read_dir(ino as u32)?.into_iter()
-                .map(|d| Entry { inode: d.id as u64, name: d.name, is_dir: d.is_dir }).collect(),
+            Fs::Ext(e) => e
+                .read_dir(ino)?
+                .into_iter()
+                .map(|d| Entry {
+                    inode: d.inode,
+                    name: d.name,
+                    is_dir: d.is_dir,
+                })
+                .collect(),
+            Fs::Xfs(x) => x
+                .read_dir(ino)?
+                .into_iter()
+                .map(|d| Entry {
+                    inode: d.inode,
+                    name: d.name,
+                    is_dir: d.is_dir,
+                })
+                .collect(),
+            Fs::Hfs(h) => h
+                .read_dir(ino as u32)?
+                .into_iter()
+                .map(|d| Entry {
+                    inode: d.id as u64,
+                    name: d.name,
+                    is_dir: d.is_dir,
+                })
+                .collect(),
         })
     }
 
@@ -1065,14 +1323,21 @@ pub fn cmd_erase_info(target: &str) -> Res<()> {
     }
     let methods = caps.methods();
     if !methods.is_empty() {
-        eprintln!("\r
-[*] usable: {}", methods.join(", "));
+        eprintln!(
+            "\r
+[*] usable: {}",
+            methods.join(", ")
+        );
     } else if caps.answered {
-        eprintln!("\r
-[!] no usable erase command on this drive");
+        eprintln!(
+            "\r
+[!] no usable erase command on this drive"
+        );
     } else {
-        eprintln!("\r
-[!] erase capability unknown -- the drive did not answer");
+        eprintln!(
+            "\r
+[!] erase capability unknown -- the drive did not answer"
+        );
     }
     // Ask the drive for its sanitize status. That command changes nothing, but
     // it rides the same pass-through, the same task-file split and the same
@@ -1137,28 +1402,40 @@ pub fn cmd_erase(target: &str, method: Option<&str>, yes: bool, cert_to: Option<
         Some(m) => m,
         None if !firmware.is_empty() => firmware[0],
         None => {
-            return Err(format!(
-                "no firmware erase available on this drive.
-                     Add --method overwrite to write over every sector instead,                  understanding that on flash it cannot reach remapped blocks."
-            ).into());
+            return Err("no firmware erase available on this drive.
+                     Add --method overwrite to write over every sector instead,                  understanding that on flash it cannot reach remapped blocks.".to_string().into());
         }
     };
     let kind = sanitize::Kind::parse(chosen);
     if kind.is_none() && chosen != "overwrite" {
         return Err(format!(
             "{chosen} is not implemented yet. Available: overwrite{}{}",
-            if firmware.iter().any(|m| sanitize::Kind::parse(m).is_some()) { ", " } else { "" },
-            firmware.iter().filter(|m| sanitize::Kind::parse(m).is_some())
-                .cloned().collect::<Vec<_>>().join(", ")
-        ).into());
+            if firmware.iter().any(|m| sanitize::Kind::parse(m).is_some()) {
+                ", "
+            } else {
+                ""
+            },
+            firmware
+                .iter()
+                .filter(|m| sanitize::Kind::parse(m).is_some())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
     }
     // Asking for a sanitize the drive never advertised is worth stopping on:
     // it will be refused anyway, and a clear message beats an ATA error code.
     if kind.is_some() && !firmware.contains(&chosen) {
         return Err(format!(
             "this drive does not advertise {chosen}. It advertises: {}",
-            if firmware.is_empty() { "nothing".into() } else { firmware.join(", ") }
-        ).into());
+            if firmware.is_empty() {
+                "nothing".into()
+            } else {
+                firmware.join(", ")
+            }
+        )
+        .into());
     }
 
     // Sample before, so afterwards there is something to compare against.
@@ -1172,9 +1449,13 @@ pub fn cmd_erase(target: &str, method: Option<&str>, yes: bool, cert_to: Option<
     }
     let had_data = before.iter().any(|b| !erase::is_pattern(b, 0));
 
-    eprintln!("\r
+    eprintln!(
+        "\r
 [!] This ERASES disk {n}: {} ({}), serial {}",
-              caps.model, human(size), caps.serial);
+        caps.model,
+        human(size),
+        caps.serial
+    );
     match kind {
         Some(k) => eprintln!("[!] The drive erases itself ({chosen}, {k:?}). There is no undo."),
         None => {
@@ -1182,7 +1463,10 @@ pub fn cmd_erase(target: &str, method: Option<&str>, yes: bool, cert_to: Option<
             eprintln!("[!] An overwrite cannot reach blocks the drive has remapped out");
             eprintln!("    of service, so it is not equivalent to a firmware sanitize.");
             if !firmware.is_empty() {
-                eprintln!("[!] This drive DOES offer {} -- prefer that.", firmware.join(", "));
+                eprintln!(
+                    "[!] This drive DOES offer {} -- prefer that.",
+                    firmware.join(", ")
+                );
             }
         }
     }
@@ -1289,11 +1573,18 @@ pub fn cmd_erase(target: &str, method: Option<&str>, yes: bool, cert_to: Option<
                 eprintln!("[!] {} still holds data: {}", human(at), hex16(&b));
             }
         }
-        samples.push(cert::Point { at, before: hex16(&before[i]), after: hex16(&b), ok });
+        samples.push(cert::Point {
+            at,
+            before: hex16(&before[i]),
+            after: hex16(&b),
+            ok,
+        });
     }
     drop(locks);
     drop(disk);
-    ps(&format!("Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"))?;
+    ps(&format!(
+        "Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue"
+    ))?;
 
     // The certificate is written whether or not it passed. One that only
     // exists on success is one that lies by omission.
@@ -1356,7 +1647,8 @@ fn erase_caveats(method: &str, crypto: bool, had_data: bool) -> Vec<String> {
     let mut v = vec![
         "Verification is by sampling. Points spread across the drive were read \
          back, including its first and last sectors; the whole surface was not \
-         re-read.".to_string(),
+         re-read."
+            .to_string(),
     ];
     if method == "overwrite" {
         v.push(
@@ -1410,16 +1702,17 @@ pub fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
     // its RAID metadata on the partition, not the disk.
     let mut spots = vec![(base, String::from("whole device"), 0u64)];
     let mut have_table = false;
-    if at.is_none() && disk_arg(target).is_some() {
-        if let Ok(l) = read_layout(&disk) {
-            have_table = true;
-            for p in &l.parts {
-                spots.push((
-                    p.start_lba * l.sector,
-                    format!("partition {} {:?}", p.number, p.name),
-                    p.sectors() * l.sector,
-                ));
-            }
+    if at.is_none()
+        && disk_arg(target).is_some()
+        && let Ok(l) = read_layout(&disk)
+    {
+        have_table = true;
+        for p in &l.parts {
+            spots.push((
+                p.start_lba * l.sector,
+                format!("partition {} {:?}", p.number, p.name),
+                p.sectors() * l.sector,
+            ));
         }
     }
     if !have_table && at.is_none() && disk_arg(target).is_some() {
@@ -1430,7 +1723,11 @@ pub fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
     for (off, what, len) in spots {
         // Probes that look at both ends of a thing need its length, not the
         // rest of the disk.
-        let span = if len > 0 { len } else { size.saturating_sub(off) };
+        let span = if len > 0 {
+            len
+        } else {
+            size.saturating_sub(off)
+        };
         let reports = identify::identify(&disk, off, span).unwrap_or_default();
         let fs = Fs::open(&disk, off).ok();
 
@@ -1440,9 +1737,16 @@ pub fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         if reports.is_empty() && fs.is_none() && is_device {
             continue;
         }
-        eprintln!("\r
-{what} at {}{}", human(off),
-                  if len > 0 { format!(", {}", human(len)) } else { String::new() });
+        eprintln!(
+            "\r
+{what} at {}{}",
+            human(off),
+            if len > 0 {
+                format!(", {}", human(len))
+            } else {
+                String::new()
+            }
+        );
         // Count per spot, not overall: whether this partition was recognised
         // has nothing to do with whether an earlier one was.
         let mut here = 0;
@@ -1464,8 +1768,10 @@ pub fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
         found += here;
     }
     if found == 0 {
-        eprintln!("\r
-[*] nothing recognised. If the partition table is gone, try:");
+        eprintln!(
+            "\r
+[*] nothing recognised. If the partition table is gone, try:"
+        );
         eprintln!("    bulkhead scan {target}");
     }
     Ok(())
@@ -1485,7 +1791,11 @@ pub fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str, debug: boo
     let fs = Fs::open(disk, base)?;
     eprintln!("[*] {name} at {}: {}", human(base), fs.describe());
     let (label, total) = (fs.label(), fs.total());
-    let label = if label.is_empty() { "bulkhead".into() } else { label };
+    let label = if label.is_empty() {
+        "bulkhead".into()
+    } else {
+        label
+    };
     winfsp::mount(fs, mount_point, &label, total, debug)
 }
 
@@ -1501,7 +1811,7 @@ pub fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
         return Ok(());
     }
     let mut entries = fs.read_dir(ino)?;
-    entries.sort_by(|a, b| (!a.is_dir, a.name.to_lowercase()).cmp(&(!b.is_dir, b.name.to_lowercase())));
+    entries.sort_by_key(|a| (!a.is_dir, a.name.to_lowercase()));
     for e in &entries {
         if e.is_dir {
             eprintln!("  {:>12}  {}/", "", e.name);
@@ -1518,11 +1828,17 @@ pub fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
 pub fn cmd_cp(target: &str, at: Option<u64>, path: &str, out_dir: &str) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
     let fs = Fs::open(&disk, base)?;
-    eprintln!("[*] {name}: {} -- copying {path:?} to {out_dir}", fs.describe());
+    eprintln!(
+        "[*] {name}: {} -- copying {path:?} to {out_dir}",
+        fs.describe()
+    );
     std::fs::create_dir_all(out_dir)?;
 
     let (ino, is_dir) = fs.resolve(path)?;
-    let leaf = path.rsplit(['/', '\\']).find(|p| !p.is_empty()).unwrap_or("root");
+    let leaf = path
+        .rsplit(['/', '\\'])
+        .find(|p| !p.is_empty())
+        .unwrap_or("root");
     let (mut files, mut bytes) = (0u64, 0u64);
 
     if !is_dir {
@@ -1560,8 +1876,15 @@ pub fn cmd_cp(target: &str, at: Option<u64>, path: &str, out_dir: &str) -> Res<(
 /// Names come off another operating system's filesystem; keep them from
 /// naming anything but a file in the output directory.
 fn safe_name(s: &str) -> String {
-    let cleaned: String = s.chars()
-        .map(|c| if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 32 { '_' } else { c })
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 32 {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     match cleaned.trim().trim_matches('.') {
         "" => "_".into(),
@@ -1614,7 +1937,11 @@ impl Table {
         let mut array = vec![0u8; bytes.div_ceil(sector as usize) * sector as usize];
         disk.seek(gpt::entry_array_lba(&header) * sector)?;
         disk.read(&mut array)?;
-        Ok(Table { header, array, sector })
+        Ok(Table {
+            header,
+            array,
+            sector,
+        })
     }
 
     /// Write the primary table, its backup, and both headers. Done only after
@@ -1682,9 +2009,11 @@ fn read_layout(disk: &Raw) -> Res<Layout> {
     // not an MBR one. Saying "MBR disk, no partitions" would send someone
     // looking in the wrong place for data that is still there.
     if mbr::is_protective(&lba0) {
-        return Err("this disk has a GPT protective MBR but its GPT would not read -- \
+        return Err(
+            "this disk has a GPT protective MBR but its GPT would not read -- \
                     the table is damaged rather than missing. Try: bulkhead scan"
-            .into());
+                .into(),
+        );
     }
 
     Ok(Layout {
@@ -1703,20 +2032,36 @@ pub fn cmd_part_list(disk_no: u32) -> Res<()> {
     let size = disk.len()?;
     let l = read_layout(&disk)?;
 
-    eprintln!("disk {disk_no}: {} ({}-byte sectors, {})", human(size), l.sector, l.kind);
+    eprintln!(
+        "disk {disk_no}: {} ({}-byte sectors, {})",
+        human(size),
+        l.sector,
+        l.kind
+    );
     let mut pos = l.first_usable;
     for p in &l.parts {
         if p.start_lba > pos {
-            eprintln!("     {:>12}  {:>10}  (free)",
-                      human(pos * l.sector), human((p.start_lba - pos) * l.sector));
+            eprintln!(
+                "     {:>12}  {:>10}  (free)",
+                human(pos * l.sector),
+                human((p.start_lba - pos) * l.sector)
+            );
         }
-        eprintln!("  {}  {:>12}  {:>10}  {}",
-                  p.number, human(p.start_lba * l.sector), human(p.sectors() * l.sector), p.name);
+        eprintln!(
+            "  {}  {:>12}  {:>10}  {}",
+            p.number,
+            human(p.start_lba * l.sector),
+            human(p.sectors() * l.sector),
+            p.name
+        );
         pos = p.end_lba + 1;
     }
     if l.last_usable > pos {
-        eprintln!("     {:>12}  {:>10}  (free)",
-                  human(pos * l.sector), human((l.last_usable - pos + 1) * l.sector));
+        eprintln!(
+            "     {:>12}  {:>10}  (free)",
+            human(pos * l.sector),
+            human((l.last_usable - pos + 1) * l.sector)
+        );
     }
     Ok(())
 }
@@ -1731,16 +2076,19 @@ pub fn cmd_part_move(disk_no: u32, number: usize, to: u64, yes: bool) -> Res<()>
     if sys.trim() == disk_no.to_string() {
         return Err(format!(
             "disk {disk_no} holds the running C:. Move partitions from the recovery media."
-        ).into());
+        )
+        .into());
     }
 
     let disk = Raw::open(&format!(r"\\.\PhysicalDrive{disk_no}"), true).ctx("open disk")?;
     let mut t = Table::read(&disk)?;
     let parts = gpt::entries(&t.header, &t.array);
-    let me = parts.iter().find(|p| p.number == number)
+    let me = parts
+        .iter()
+        .find(|p| p.number == number)
         .ok_or_else(|| format!("disk {disk_no} has no partition {number}"))?;
 
-    if to % t.sector != 0 {
+    if !to.is_multiple_of(t.sector) {
         return Err(format!("offset must be a multiple of the {}-byte sector", t.sector).into());
     }
     let new_start = to / t.sector;
@@ -1750,10 +2098,12 @@ pub fn cmd_part_move(disk_no: u32, number: usize, to: u64, yes: bool) -> Res<()>
     if new_start < gpt::first_usable(&t.header) || new_end > gpt::last_usable(&t.header) {
         return Err(format!(
             "{} .. {} is outside the usable area ({} .. {})",
-            human(new_start * t.sector), human((new_end + 1) * t.sector),
+            human(new_start * t.sector),
+            human((new_end + 1) * t.sector),
             human(gpt::first_usable(&t.header) * t.sector),
             human((gpt::last_usable(&t.header) + 1) * t.sector)
-        ).into());
+        )
+        .into());
     }
     for other in parts.iter().filter(|p| p.number != number) {
         if new_start <= other.end_lba && other.start_lba <= new_end {
@@ -1765,8 +2115,12 @@ pub fn cmd_part_move(disk_no: u32, number: usize, to: u64, yes: bool) -> Res<()>
         return Ok(());
     }
 
-    eprintln!("\n[!] Moving disk {disk_no} partition {number} ({}) from {} to {}",
-              human(len * t.sector), human(me.start_lba * t.sector), human(to));
+    eprintln!(
+        "\n[!] Moving disk {disk_no} partition {number} ({}) from {} to {}",
+        human(len * t.sector),
+        human(me.start_lba * t.sector),
+        human(to)
+    );
     eprintln!("[!] Interrupting this loses the partition. There is no journal.");
     if !yes {
         eprint!("    Type YES to continue: ");
@@ -1821,7 +2175,11 @@ fn move_bytes(disk: &Raw, from: u64, to: u64, len: u64) -> Res<()> {
     let mut done = 0u64;
     let mut last_pct = u64::MAX;
 
-    eprintln!("[*] moving {} {}", human(len), if backwards { "(backwards)" } else { "" });
+    eprintln!(
+        "[*] moving {} {}",
+        human(len),
+        if backwards { "(backwards)" } else { "" }
+    );
     while done < len {
         let (off, n) = step(len, done, CHUNK as u64, backwards);
         disk.seek(from + off)?;
@@ -1847,7 +2205,11 @@ fn move_bytes(disk: &Raw, from: u64, to: u64, len: u64) -> Res<()> {
 pub fn cmd_mount(path: &str, rw: bool) -> Res<()> {
     let vhd = Vhd::open(path, rw)?;
     vhd.attach(!rw, true, true)?;
-    eprintln!("[+] attached {} ({})", vhd.physical_path()?, if rw { "read-write" } else { "read-only" });
+    eprintln!(
+        "[+] attached {} ({})",
+        vhd.physical_path()?,
+        if rw { "read-write" } else { "read-only" }
+    );
     eprintln!("    it appears in Explorer; detach with:  bulkhead unmount {path}");
     Ok(())
 }
@@ -1950,7 +2312,10 @@ mod tests {
             disk[to + o..to + o + n].copy_from_slice(&piece);
             done += n as u64;
         }
-        (disk[to..to + len].to_vec(), original[from..from + len].to_vec())
+        (
+            disk[to..to + len].to_vec(),
+            original[from..from + len].to_vec(),
+        )
     }
 
     #[test]
@@ -1984,7 +2349,7 @@ mod tests {
         assert_eq!(human(0), "0 B");
         assert_eq!(human(1 << 30), "1.0 GB");
         // VHDX must be >= volume + GPT slack, and 1 MiB aligned
-        let d = |v: u64| (v + 8 * MB + MB - 1) / MB * MB;
+        let d = |v: u64| (v + 8 * MB).div_ceil(MB) * MB;
         assert!(d(100 * MB + 1) > 100 * MB && d(100 * MB + 1) % MB == 0);
     }
 }

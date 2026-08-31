@@ -8,8 +8,8 @@
 //!
 //! Read-only, deliberately and permanently. Writing ext4 safely means the
 //! journal, and a half-understood journal is how filesystems get destroyed.
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 const SUPERBLOCK_OFFSET: u64 = 1024;
 const MAGIC: u16 = 0xEF53;
@@ -110,7 +110,11 @@ pub fn dir_entries(block: &[u8]) -> Vec<DirEntry> {
         if inode != 0 && name_len > 0 && off + 8 + name_len <= block.len() {
             let name = String::from_utf8_lossy(&block[off + 8..off + 8 + name_len]).into_owned();
             if name != "." && name != ".." {
-                v.push(DirEntry { inode, name, is_dir: file_type == 2 });
+                v.push(DirEntry {
+                    inode,
+                    name,
+                    is_dir: file_type == 2,
+                });
             }
         }
         off += rec_len;
@@ -188,7 +192,11 @@ impl<'a> Ext<'a> {
         self.disk.seek(start)?;
         let got = self.disk.read(&mut b).ctx("read")?;
         if got < skip + len {
-            return Err(format!("short read at {off}: wanted {len}, got {}", got.saturating_sub(skip)).into());
+            return Err(format!(
+                "short read at {off}: wanted {len}, got {}",
+                got.saturating_sub(skip)
+            )
+            .into());
         }
         b.drain(..skip);
         b.truncate(len);
@@ -196,7 +204,10 @@ impl<'a> Ext<'a> {
     }
 
     fn read_block(&self, block: u64) -> Res<Vec<u8>> {
-        self.read_at(self.base + block * self.block_size, self.block_size as usize)
+        self.read_at(
+            self.base + block * self.block_size,
+            self.block_size as usize,
+        )
     }
 
     /// Raw inode bytes. Inodes are numbered from 1 and live in a per-group
@@ -287,7 +298,10 @@ impl<'a> Ext<'a> {
     pub fn resolve(&self, path: &str) -> Res<(u64, bool)> {
         let mut ino = ROOT;
         let mut is_dir = true;
-        for part in path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+        for part in path
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
             let entries = self.read_dir(ino)?;
             let hit = entries
                 .iter()
@@ -330,8 +344,16 @@ mod tests {
         assert_eq!(
             leaf_extents(&n).unwrap(),
             vec![
-                Extent { logical: 0, block: 1000, count: 4 },
-                Extent { logical: 4, block: 2000, count: 2 },
+                Extent {
+                    logical: 0,
+                    block: 1000,
+                    count: 4
+                },
+                Extent {
+                    logical: 4,
+                    block: 2000,
+                    count: 2
+                },
             ]
         );
         assert!(index_children(&n).is_none(), "a leaf has no children");
@@ -383,8 +405,22 @@ mod tests {
         let e = dir_entries(&b);
         // . and .. are navigation, not contents
         assert_eq!(e.len(), 2);
-        assert_eq!(e[0], DirEntry { inode: 11, name: "lost+found".into(), is_dir: true });
-        assert_eq!(e[1], DirEntry { inode: 12, name: "notes.txt".into(), is_dir: false });
+        assert_eq!(
+            e[0],
+            DirEntry {
+                inode: 11,
+                name: "lost+found".into(),
+                is_dir: true
+            }
+        );
+        assert_eq!(
+            e[1],
+            DirEntry {
+                inode: 12,
+                name: "notes.txt".into(),
+                is_dir: false
+            }
+        );
     }
 
     #[test]

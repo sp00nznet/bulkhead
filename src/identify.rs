@@ -7,8 +7,8 @@
 //! between you and any filesystem at all.
 //!
 //! Every probe here is read-only and reports what a header says about itself.
-use crate::util::{human, Res};
 use crate::Raw;
+use crate::util::{Res, human};
 
 pub struct Report {
     pub kind: &'static str,
@@ -38,7 +38,9 @@ fn text(b: &[u8]) -> String {
 
 /// Only report a name if it looks like one; a wrong label is worse than none.
 fn printable(s: String) -> Option<String> {
-    let ok = !s.is_empty() && s.chars().all(|c| c == ' ' || (!c.is_control() && c.is_ascii()));
+    let ok = !s.is_empty()
+        && s.chars()
+            .all(|c| c == ' ' || (!c.is_control() && c.is_ascii()));
     ok.then_some(s)
 }
 
@@ -47,7 +49,14 @@ pub fn uuid_str(b: &[u8]) -> String {
     if h.len() < 32 {
         return h;
     }
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 /// What a device's slot number means in an md array.
@@ -120,15 +129,26 @@ fn md_raid(disk: &Raw, base: u64, size: u64) -> Option<Report> {
         format!("array {:?}", text(&sb[0x20..0x40])),
         format!("array UUID {}", uuid_str(&sb[0x10..0x20])),
         format!("{}, {raid_disks} devices", md_level(le32(&sb, 0x48))),
-        format!("this disk is device {dev_number}{}",
-                role.map(|r| format!(", {}", md_role(r))).unwrap_or_default()),
-        format!("chunk {}, data starts {} in",
-                human(le32(&sb, 0x58) * 512), human(le64(&sb, 0x80) * 512)),
-        format!("events {} -- members with different counts are out of sync",
-                le64(&sb, 0xC8)),
+        format!(
+            "this disk is device {dev_number}{}",
+            role.map(|r| format!(", {}", md_role(r)))
+                .unwrap_or_default()
+        ),
+        format!(
+            "chunk {}, data starts {} in",
+            human(le32(&sb, 0x58) * 512),
+            human(le64(&sb, 0x80) * 512)
+        ),
+        format!(
+            "events {} -- members with different counts are out of sync",
+            le64(&sb, 0xC8)
+        ),
     ];
     lines.push("assemble with mdadm on Linux before the filesystem is reachable".into());
-    Some(Report { kind: "Linux MD RAID member", lines })
+    Some(Report {
+        kind: "Linux MD RAID member",
+        lines,
+    })
 }
 
 // --- LVM2 -------------------------------------------------------------------
@@ -147,7 +167,9 @@ fn lvm2(disk: &Raw, base: u64) -> Option<Report> {
 
     // The volume group's name is in the text metadata, which begins with it.
     let mda = read_at(disk, base, 4096, 4096).and_then(|m| {
-        let start = m.iter().position(|&c| c.is_ascii_alphanumeric() || c == b'_')?;
+        let start = m
+            .iter()
+            .position(|&c| c.is_ascii_alphanumeric() || c == b'_')?;
         let s = String::from_utf8_lossy(&m[start..]);
         let name = s.split_whitespace().next()?.to_string();
         (!name.is_empty() && name.len() < 128).then_some(name)
@@ -156,7 +178,10 @@ fn lvm2(disk: &Raw, base: u64) -> Option<Report> {
         lines.push(format!("volume group {vg:?}"));
     }
     lines.push("activate with vgchange on Linux to reach the volumes".into());
-    Some(Report { kind: "LVM2 physical volume", lines })
+    Some(Report {
+        kind: "LVM2 physical volume",
+        lines,
+    })
 }
 
 // --- ZFS --------------------------------------------------------------------
@@ -188,14 +213,21 @@ pub fn nvlist_pairs(b: &[u8]) -> Vec<(String, Nv)> {
         };
         let name_at = off + 12;
         let padded = name_len.div_ceil(4) * 4;
-        let Some(name) = b.get(name_at..name_at + name_len) else { break };
+        let Some(name) = b.get(name_at..name_at + name_len) else {
+            break;
+        };
         let name = String::from_utf8_lossy(name).into_owned();
 
         let t_at = name_at + padded;
-        let Some(ty) = b.get(t_at..t_at + 4).map(|x| be32(x, 0)) else { break };
+        let Some(ty) = b.get(t_at..t_at + 4).map(|x| be32(x, 0)) else {
+            break;
+        };
         let val_at = t_at + 8; // past type and element count
         let v = match ty {
-            8 => b.get(val_at..val_at + 8).map(|x| Nv::U64(be64(x, 0))).unwrap_or(Nv::Other),
+            8 => b
+                .get(val_at..val_at + 8)
+                .map(|x| Nv::U64(be64(x, 0)))
+                .unwrap_or(Nv::Other),
             9 => b
                 .get(val_at..val_at + 4)
                 .and_then(|x| {
@@ -229,9 +261,14 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
     let mut labels = Vec::new();
     let mut front = 0;
     for (off, name, is_front) in spots {
-        let Some(b) = read_at(disk, base, off, 112 * 1024) else { continue };
+        let Some(b) = read_at(disk, base, off, 112 * 1024) else {
+            continue;
+        };
         let pairs = nvlist_pairs(&b);
-        if !pairs.iter().any(|(n, v)| n == "name" && matches!(v, Nv::Str(_))) {
+        if !pairs
+            .iter()
+            .any(|(n, v)| n == "name" && matches!(v, Nv::Str(_)))
+        {
             continue;
         }
         labels.push(name);
@@ -244,7 +281,9 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
     }
     let pairs = found?;
     let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-    let Some(Nv::Str(name)) = get("name") else { return None };
+    let Some(Nv::Str(name)) = get("name") else {
+        return None;
+    };
 
     let mut lines = vec![format!("pool {name:?}")];
     if let Some(Nv::U64(g)) = get("pool_guid") {
@@ -254,15 +293,20 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
         lines.push(format!("this device GUID {g:#x}"));
     }
     if let Some(Nv::U64(s)) = get("state") {
-        lines.push(format!("state {}", match s {
-            0 => "active".into(),
-            1 => "exported".into(),
-            2 => "destroyed".into(),
-            n => format!("{n}"),
-        }));
+        lines.push(format!(
+            "state {}",
+            match s {
+                0 => "active".into(),
+                1 => "exported".into(),
+                2 => "destroyed".into(),
+                n => format!("{n}"),
+            }
+        ));
     }
     if let Some(Nv::U64(t)) = get("txg") {
-        lines.push(format!("txg {t} -- members with different txgs are out of sync"));
+        lines.push(format!(
+            "txg {t} -- members with different txgs are out of sync"
+        ));
     }
     if let Some(Nv::Str(h)) = get("hostname") {
         lines.push(format!("last used by host {h:?}"));
@@ -273,23 +317,34 @@ fn zfs(disk: &Raw, base: u64, size: u64) -> Option<Report> {
     // reformats writes over the front and rarely touches the last megabyte, so
     // labels surviving only at the end mean this membership is history.
     let end = labels.iter().filter(|l| **l == "L2" || **l == "L3").count();
-    lines.push(format!("labels present: {} of 4 ({})", labels.len(), labels.join(", ")));
+    lines.push(format!(
+        "labels present: {} of 4 ({})",
+        labels.len(),
+        labels.join(", ")
+    ));
     if labels.len() == 4 {
         lines.push("all four intact, consistent with a member still in use".into());
     } else {
         let mut why = String::from("a member in use carries all four");
         if front == 0 {
-            why.push_str("; the front copies are gone, so something has been written over the start");
+            why.push_str(
+                "; the front copies are gone, so something has been written over the start",
+            );
         }
         if end == 0 {
-            why.push_str("; the end copies are gone, which is what repartitioning or shrinking does");
+            why.push_str(
+                "; the end copies are gone, which is what repartitioning or shrinking does",
+            );
         }
-        lines.push(format!("{why}"));
+        lines.push(why.to_string());
         lines.push("treat this as a former membership unless zpool says otherwise".into());
     }
     lines.push("these fields are what the label recorded when last written, not now".into());
     lines.push("import with zpool on a system that speaks ZFS; bulkhead does not read it".into());
-    Some(Report { kind: "ZFS pool member", lines })
+    Some(Report {
+        kind: "ZFS pool member",
+        lines,
+    })
 }
 
 // --- btrfs ------------------------------------------------------------------
@@ -304,7 +359,11 @@ fn btrfs(disk: &Raw, base: u64) -> Option<Report> {
         format!("filesystem UUID {}", uuid_str(&sb[0x20..0x30])),
         format!("{} of {} device(s) in this filesystem", 1, devices),
         format!("this device is id {}", le64(&sb, 0xC9)),
-        format!("{} used of {}", human(le64(&sb, 0x78)), human(le64(&sb, 0x70))),
+        format!(
+            "{} used of {}",
+            human(le64(&sb, 0x78)),
+            human(le64(&sb, 0x70))
+        ),
     ];
     if let Some(l) = printable(text(&sb[0x12B..0x22B])) {
         lines.insert(0, format!("label {l:?}"));
@@ -312,14 +371,16 @@ fn btrfs(disk: &Raw, base: u64) -> Option<Report> {
     if devices > 1 {
         lines.push("multi-device: every member is needed before this mounts".into());
     }
-    Some(Report { kind: "btrfs", lines })
+    Some(Report {
+        kind: "btrfs",
+        lines,
+    })
 }
 
 // --- bcachefs ---------------------------------------------------------------
 
 const BCACHEFS_MAGIC: [u8; 16] = [
-    0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca,
-    0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
+    0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
 ];
 
 fn bcachefs(disk: &Raw, base: u64) -> Option<Report> {
@@ -335,7 +396,10 @@ fn bcachefs(disk: &Raw, base: u64) -> Option<Report> {
     if let Some(l) = printable(text(&sb[0x48..0x68])) {
         lines.insert(0, format!("label {l:?}"));
     }
-    Some(Report { kind: "bcachefs", lines })
+    Some(Report {
+        kind: "bcachefs",
+        lines,
+    })
 }
 
 // --- SquashFS ---------------------------------------------------------------
@@ -358,8 +422,12 @@ fn squashfs(disk: &Raw, base: u64) -> Option<Report> {
         kind: "SquashFS image",
         lines: vec![
             format!("version {}.{}", le16(&sb, 0x1C), le16(&sb, 0x1E)),
-            format!("{} inodes, {} used, {} blocks, {comp} compressed",
-                    le32(&sb, 0x04), human(le64(&sb, 0x28)), human(le32(&sb, 0x0C))),
+            format!(
+                "{} inodes, {} used, {} blocks, {comp} compressed",
+                le32(&sb, 0x04),
+                human(le64(&sb, 0x28)),
+                human(le32(&sb, 0x0C))
+            ),
             "contents are compressed; bulkhead identifies these but does not unpack them".into(),
         ],
     })
@@ -381,7 +449,10 @@ fn ufs2(disk: &Raw, base: u64) -> Option<Report> {
         lines.push(format!("volume name {v:?}"));
     }
     lines.push("FreeBSD/pfSense/TrueNAS; reading is not implemented yet".into());
-    Some(Report { kind: "UFS2", lines })
+    Some(Report {
+        kind: "UFS2",
+        lines,
+    })
 }
 
 // --- VMFS -------------------------------------------------------------------
@@ -398,7 +469,10 @@ fn vmfs(disk: &Raw, base: u64) -> Option<Report> {
         lines.insert(0, format!("label {l:?}"));
     }
     lines.push("VMware datastore; reading is not implemented".into());
-    Some(Report { kind: "VMFS", lines })
+    Some(Report {
+        kind: "VMFS",
+        lines,
+    })
 }
 
 // --- what Windows already handles -------------------------------------------
@@ -419,13 +493,20 @@ fn known_fs(disk: &Raw, base: u64) -> Option<Report> {
     let mut lines = vec![format!(
         "{}{}, {}",
         c.fstype,
-        if c.label.is_empty() { String::new() } else { format!(" {:?}", c.label) },
+        if c.label.is_empty() {
+            String::new()
+        } else {
+            format!(" {:?}", c.label)
+        },
         human(c.bytes())
     )];
     if matches!(c.fstype, "ntfs" | "exfat" | "fat") {
         lines.push("Windows reads this natively; open it in Explorer".into());
     }
-    Some(Report { kind: "filesystem", lines })
+    Some(Report {
+        kind: "filesystem",
+        lines,
+    })
 }
 
 /// Everything that recognises itself on this device.
@@ -488,7 +569,11 @@ mod tests {
         let mut name = 4u32.to_be_bytes().to_vec();
         name.extend_from_slice(b"tank");
         b.extend(nvpair("name", 9, &name));
-        b.extend(nvpair("pool_guid", 8, &0x1234_5678_9abc_def0u64.to_be_bytes()));
+        b.extend(nvpair(
+            "pool_guid",
+            8,
+            &0x1234_5678_9abc_def0u64.to_be_bytes(),
+        ));
         b.extend_from_slice(&0u32.to_be_bytes()); // terminator
 
         let p = nvlist_pairs(&b);

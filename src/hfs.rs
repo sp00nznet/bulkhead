@@ -6,8 +6,8 @@
 //! folder and name -- holds every directory entry on the volume.
 //!
 //! Read-only.
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 const HEADER_OFFSET: u64 = 1024;
 /// "H+" is HFS+, "HX" is HFSX -- the case-sensitive variant. Same layout.
@@ -53,7 +53,11 @@ pub fn fork(b: &[u8]) -> Option<Fork> {
         }
         extents.push((start, count));
     }
-    Some(Fork { size: b64(b, 0), total_blocks: b32(b, 12), extents })
+    Some(Fork {
+        size: b64(b, 0),
+        total_blocks: b32(b, 12),
+        extents,
+    })
 }
 
 /// Byte offsets of each record in a B-tree node.
@@ -61,7 +65,11 @@ pub fn fork(b: &[u8]) -> Option<Fork> {
 /// They are stored at the *end* of the node, backwards: the last two bytes
 /// point at record 0. Reading them forwards yields offsets into nothing.
 pub fn record_offsets(node: &[u8], node_size: usize) -> Vec<usize> {
-    let count = if node.len() >= 14 { b16(node, 10) as usize } else { 0 };
+    let count = if node.len() >= 14 {
+        b16(node, 10) as usize
+    } else {
+        0
+    };
     let mut v = Vec::new();
     for i in 0..count {
         let at = node_size.checked_sub(2 * (i + 1));
@@ -93,7 +101,12 @@ pub fn catalog_key(rec: &[u8]) -> Option<(u32, String, usize)> {
     if end > rec.len() || end > key_len + 2 {
         return None;
     }
-    let utf16: Vec<u16> = rec[8..end].chunks_exact(2).map(|c| b16(c, 0)).collect();
+    let utf16: Vec<u16> = rec[8..end]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| b16(c, 0))
+        .collect();
     // The record data follows the key, aligned to a two-byte boundary.
     let data_at = (2 + key_len).div_ceil(2) * 2;
     Some((parent, String::from_utf16_lossy(&utf16), data_at))
@@ -190,7 +203,10 @@ impl<'a> Hfs<'a> {
             for &(start, count) in &f.extents {
                 let span = count as u64 * self.block_size;
                 if pos < walked + span {
-                    found = Some((start as u64 * self.block_size + (pos - walked), walked + span - pos));
+                    found = Some((
+                        start as u64 * self.block_size + (pos - walked),
+                        walked + span - pos,
+                    ));
                     break;
                 }
                 walked += span;
@@ -211,7 +227,11 @@ impl<'a> Hfs<'a> {
     }
 
     fn catalog_bytes(&self, node: u32, len: usize) -> Res<Vec<u8>> {
-        let size = if self.node_size == 0 { len } else { self.node_size };
+        let size = if self.node_size == 0 {
+            len
+        } else {
+            self.node_size
+        };
         self.fork_read(&self.catalog, node as u64 * size as u64, len)
     }
 
@@ -232,7 +252,9 @@ impl<'a> Hfs<'a> {
             }
             let buf = self.catalog_bytes(node, self.node_size)?;
             for off in record_offsets(&buf, self.node_size) {
-                let Some((parent, name, data_at)) = catalog_key(&buf[off..]) else { continue };
+                let Some((parent, name, data_at)) = catalog_key(&buf[off..]) else {
+                    continue;
+                };
                 if parent != folder {
                     continue;
                 }
@@ -242,8 +264,16 @@ impl<'a> Hfs<'a> {
                 }
                 let kind = b16(&buf, d) as i16;
                 match kind {
-                    REC_FOLDER => out.push(DirEntry { id: b32(&buf, d + 8), name, is_dir: true }),
-                    REC_FILE => out.push(DirEntry { id: b32(&buf, d + 8), name, is_dir: false }),
+                    REC_FOLDER => out.push(DirEntry {
+                        id: b32(&buf, d + 8),
+                        name,
+                        is_dir: true,
+                    }),
+                    REC_FILE => out.push(DirEntry {
+                        id: b32(&buf, d + 8),
+                        name,
+                        is_dir: false,
+                    }),
                     _ => {} // thread records, which map an id back to its parent
                 }
             }
@@ -258,9 +288,12 @@ impl<'a> Hfs<'a> {
         while node != 0 {
             let buf = self.catalog_bytes(node, self.node_size)?;
             for off in record_offsets(&buf, self.node_size) {
-                let Some((_, _, data_at)) = catalog_key(&buf[off..]) else { continue };
+                let Some((_, _, data_at)) = catalog_key(&buf[off..]) else {
+                    continue;
+                };
                 let d = off + data_at;
-                if d + 168 > buf.len() || b16(&buf, d) as i16 != REC_FILE || b32(&buf, d + 8) != id {
+                if d + 168 > buf.len() || b16(&buf, d) as i16 != REC_FILE || b32(&buf, d + 8) != id
+                {
                     continue;
                 }
                 // dataFork sits 88 bytes into a catalog file record.
@@ -286,12 +319,19 @@ impl<'a> Hfs<'a> {
     pub fn resolve(&self, path: &str) -> Res<(u32, bool)> {
         let mut id = ROOT_FOLDER;
         let mut is_dir = true;
-        for part in path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+        for part in path
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
             let hit = self
                 .read_dir(id)?
                 .into_iter()
                 .find(|e| {
-                    if self.case_sensitive { e.name == part } else { e.name.eq_ignore_ascii_case(part) }
+                    if self.case_sensitive {
+                        e.name == part
+                    } else {
+                        e.name.eq_ignore_ascii_case(part)
+                    }
                 })
                 .ok_or_else(|| format!("{part:?} not found in {path:?}"))?;
             id = hit.id;

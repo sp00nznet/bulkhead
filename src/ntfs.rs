@@ -4,8 +4,8 @@
 //! clusters free. The record, the name and the map of where the data lives all
 //! survive until something reuses them -- which is why undelete works at all,
 //! and why it stops working the moment you keep using the volume.
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 /// Every MFT record starts with this.
 const MAGIC: &[u8; 4] = b"FILE";
@@ -158,7 +158,12 @@ fn file_name(a: &[u8]) -> Option<String> {
     }
     let n = v[0x40] as usize;
     let bytes = v.get(0x42..0x42 + n * 2)?;
-    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let utf16: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     Some(String::from_utf16_lossy(&utf16))
 }
 
@@ -192,20 +197,35 @@ impl<'a> Ntfs<'a> {
         }
         let sector = u16at(&bs, 0x0B) as u64;
         let spc = bs[0x0D] as i8;
-        let cluster = if spc > 0 { sector * spc as u64 } else { 1u64 << (-(spc as i32) as u32) };
+        let cluster = if spc > 0 {
+            sector * spc as u64
+        } else {
+            1u64 << (-(spc as i32) as u32)
+        };
         if !(256..=65536).contains(&sector) || cluster == 0 {
             return Err("boot sector geometry is not believable".into());
         }
         // Same signed encoding as sectors-per-cluster: negative means a power
         // of two in bytes rather than a count of clusters.
         let cpr = bs[0x40] as i8;
-        let rec_size = if cpr > 0 { cluster * cpr as u64 } else { 1u64 << (-(cpr as i32) as u32) };
+        let rec_size = if cpr > 0 {
+            cluster * cpr as u64
+        } else {
+            1u64 << (-(cpr as i32) as u32)
+        };
         if !(256..=65536).contains(&rec_size) {
             return Err("MFT record size is not believable".into());
         }
 
         let mft_off = base + u64at(&bs, 0x30) * cluster;
-        let mut me = Ntfs { disk, base, cluster, rec_size, sector: sector as usize, mft: Vec::new() };
+        let mut me = Ntfs {
+            disk,
+            base,
+            cluster,
+            rec_size,
+            sector: sector as usize,
+            mft: Vec::new(),
+        };
 
         // Record 0 is the MFT's own entry, and its $DATA runs are the map of
         // the MFT itself. Everything else is read through it.
@@ -259,8 +279,12 @@ impl<'a> Ntfs<'a> {
             if out.len() >= limit {
                 break;
             }
-            let Some(off) = self.record_offset(n) else { break };
-            let Ok(mut rec) = self.read_record_at(off) else { continue };
+            let Some(off) = self.record_offset(n) else {
+                break;
+            };
+            let Ok(mut rec) = self.read_record_at(off) else {
+                continue;
+            };
             if &rec[..4] != MAGIC || !apply_fixup(&mut rec, self.sector) {
                 continue;
             }
@@ -271,15 +295,27 @@ impl<'a> Ntfs<'a> {
             }
 
             let list = attrs(&rec);
-            let Some(name) = list.iter().filter(|(t, _)| *t == ATTR_FILE_NAME)
-                .find_map(|(_, a)| file_name(a)) else { continue };
-            let Some((_, data)) = list.iter().find(|(t, _)| *t == ATTR_DATA) else { continue };
+            let Some(name) = list
+                .iter()
+                .filter(|(t, _)| *t == ATTR_FILE_NAME)
+                .find_map(|(_, a)| file_name(a))
+            else {
+                continue;
+            };
+            let Some((_, data)) = list.iter().find(|(t, _)| *t == ATTR_DATA) else {
+                continue;
+            };
 
             let d = if data[A_NONRES] == 0 {
                 let vo = u16at(data, A_RES_OFF) as usize;
                 let vl = u32at(data, A_RES_LEN) as usize;
                 match data.get(vo..vo + vl) {
-                    Some(v) => Deleted { name, size: vl as u64, resident: Some(v.to_vec()), runs: vec![] },
+                    Some(v) => Deleted {
+                        name,
+                        size: vl as u64,
+                        resident: Some(v.to_vec()),
+                        runs: vec![],
+                    },
                     None => continue,
                 }
             } else {
@@ -288,7 +324,12 @@ impl<'a> Ntfs<'a> {
                 if runs.is_empty() {
                     continue;
                 }
-                Deleted { name, size: u64at(data, A_REAL_SIZE), resident: None, runs }
+                Deleted {
+                    name,
+                    size: u64at(data, A_REAL_SIZE),
+                    resident: None,
+                    runs,
+                }
             };
             out.push(d);
         }
@@ -344,10 +385,14 @@ mod tests {
         rec[R_USA_CNT..R_USA_CNT + 2].copy_from_slice(&3u16.to_le_bytes());
         rec[0x30] = 0xAA;
         rec[0x31] = 0xBB;
-        rec[0x32] = 0x11; rec[0x33] = 0x22; // real bytes of sector 0's tail
-        rec[0x34] = 0x33; rec[0x35] = 0x44; // ... and sector 1's
-        rec[510] = 0xAA; rec[511] = 0xBB;
-        rec[1022] = 0xAA; rec[1023] = 0xBB;
+        rec[0x32] = 0x11;
+        rec[0x33] = 0x22; // real bytes of sector 0's tail
+        rec[0x34] = 0x33;
+        rec[0x35] = 0x44; // ... and sector 1's
+        rec[510] = 0xAA;
+        rec[511] = 0xBB;
+        rec[1022] = 0xAA;
+        rec[1023] = 0xBB;
 
         assert!(apply_fixup(&mut rec, 512));
         assert_eq!(&rec[510..512], &[0x11, 0x22]);
@@ -359,16 +404,25 @@ mod tests {
         let mut rec = vec![0u8; 1024];
         rec[R_USA_OFF..R_USA_OFF + 2].copy_from_slice(&0x30u16.to_le_bytes());
         rec[R_USA_CNT..R_USA_CNT + 2].copy_from_slice(&3u16.to_le_bytes());
-        rec[0x30] = 0xAA; rec[0x31] = 0xBB;
-        rec[510] = 0xAA; rec[511] = 0xBB;
-        rec[1022] = 0x00; rec[1023] = 0x00; // second sector never got stamped
-        assert!(!apply_fixup(&mut rec, 512), "mismatched stamp means a bad record");
+        rec[0x30] = 0xAA;
+        rec[0x31] = 0xBB;
+        rec[510] = 0xAA;
+        rec[511] = 0xBB;
+        rec[1022] = 0x00;
+        rec[1023] = 0x00; // second sector never got stamped
+        assert!(
+            !apply_fixup(&mut rec, 512),
+            "mismatched stamp means a bad record"
+        );
     }
 
     #[test]
     fn runs_are_relative_and_signed() {
         // 0x21 0x18 0x34 0x12 -> 1 length byte, 2 offset bytes: 0x18 clusters at 0x1234
-        assert_eq!(decode_runs(&[0x21, 0x18, 0x34, 0x12, 0x00]), vec![(0x1234, 0x18)]);
+        assert_eq!(
+            decode_runs(&[0x21, 0x18, 0x34, 0x12, 0x00]),
+            vec![(0x1234, 0x18)]
+        );
 
         // second run's offset is a delta from the first, and may be negative
         let b = [0x21, 0x10, 0x00, 0x10, 0x21, 0x10, 0x00, 0xF0, 0x00];
@@ -378,7 +432,11 @@ mod tests {
         // sparse run: no offset field, position must not move
         let b = [0x11, 0x08, 0x20, 0x01, 0x08, 0x11, 0x08, 0x10, 0x00];
         let r = decode_runs(&b);
-        assert_eq!(r, vec![(0x20, 0x08), (0x30, 0x08)], "a hole must not shift the LCN");
+        assert_eq!(
+            r,
+            vec![(0x20, 0x08), (0x30, 0x08)],
+            "a hole must not shift the LCN"
+        );
 
         // truncated list stops cleanly rather than reading past the end
         assert_eq!(decode_runs(&[0x21, 0x18]), vec![]);

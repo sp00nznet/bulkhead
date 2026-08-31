@@ -81,7 +81,9 @@ fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" | "--to" | "--at" | "--limit" | "--method" | "--cert" => { it.next(); }
+            "--from" | "--to" | "--at" | "--limit" | "--method" | "--cert" => {
+                it.next();
+            }
             _ if x.starts_with("--") => {}
             _ => v.push(x),
         }
@@ -93,7 +95,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let flag = |f: &str| a.contains(&f);
-    let opt = |f: &str| a.iter().position(|&x| x == f).and_then(|i| a.get(i + 1)).copied();
+    let opt = |f: &str| {
+        a.iter()
+            .position(|&x| x == f)
+            .and_then(|i| a.get(i + 1))
+            .copied()
+    };
     let pos = positional(&a);
 
     let r = match pos.as_slice() {
@@ -116,16 +123,25 @@ fn main() {
             None => Err("cp needs --to <DIR>".into()),
         },
         ["carve", t] => match opt("--to") {
-            Some(dir) => cmd_carve(t, dir,
-                                   opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(5_000)),
+            Some(dir) => cmd_carve(
+                t,
+                dir,
+                opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(5_000),
+            ),
             None => Err("carve needs --to <DIR>".into()),
         },
         ["undo", d, file] => disk_arg(d)
             .ok_or_else(|| format!("{d:?} is not a disk").into())
             .and_then(|n| cmd_undo(n, file, flag("--yes"))),
         ["undelete", t] => match opt("--to") {
-            Some(dir) => cmd_undelete(t, opt("--at").and_then(parse_size), dir,
-                                      opt("--limit").and_then(|l| l.parse().ok()).unwrap_or(10_000)),
+            Some(dir) => cmd_undelete(
+                t,
+                opt("--at").and_then(parse_size),
+                dir,
+                opt("--limit")
+                    .and_then(|l| l.parse().ok())
+                    .unwrap_or(10_000),
+            ),
             None => Err("undelete needs --to <DIR>".into()),
         },
         ["scan", d] => disk_arg(d)
@@ -134,12 +150,17 @@ fn main() {
         ["part", "list", d] => disk_arg(d)
             .ok_or_else(|| format!("{d:?} is not a disk").into())
             .and_then(cmd_part_list),
-        ["part", "move", d, n] => match (disk_arg(d), n.parse(), opt("--to").and_then(parse_size)) {
-            (Some(d), Ok(n), Some(to)) => cmd_part_move(d, n, to, flag("--yes")),
-            (_, _, None) => Err("part move needs --to <OFFSET>".into()),
-            _ => Err(format!("bad disk or partition number: {d:?} {n:?}").into()),
-        },
-        _ => { eprintln!("{USAGE}"); std::process::exit(2); }
+        ["part", "move", d, n] => {
+            match (disk_arg(d), n.parse(), opt("--to").and_then(parse_size)) {
+                (Some(d), Ok(n), Some(to)) => cmd_part_move(d, n, to, flag("--yes")),
+                (_, _, None) => Err("part move needs --to <OFFSET>".into()),
+                _ => Err(format!("bad disk or partition number: {d:?} {n:?}").into()),
+            }
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
     };
     if let Err(e) = r {
         eprintln!("[!] {e}");
@@ -153,15 +174,24 @@ mod tests {
 
     #[test]
     fn args() {
-        assert_eq!(positional(&["image", "C:", "o.vhdx"]), ["image", "C:", "o.vhdx"]);
+        assert_eq!(
+            positional(&["image", "C:", "o.vhdx"]),
+            ["image", "C:", "o.vhdx"]
+        );
         // options swallow their value; bare flags vanish
         assert_eq!(
             positional(&["image", "C:", "o.vhdx", "--from", "p.vhdx", "--no-snapshot"]),
             ["image", "C:", "o.vhdx"]
         );
         // a flag wedged between positionals must not eat one
-        assert_eq!(positional(&["mount", "--rw", "o.vhdx"]), ["mount", "o.vhdx"]);
+        assert_eq!(
+            positional(&["mount", "--rw", "o.vhdx"]),
+            ["mount", "o.vhdx"]
+        );
         // trailing --from with no value must not panic
-        assert_eq!(positional(&["mount", "o.vhdx", "--from"]), ["mount", "o.vhdx"]);
+        assert_eq!(
+            positional(&["mount", "o.vhdx", "--from"]),
+            ["mount", "o.vhdx"]
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! Volume Shadow Copy: a frozen, consistent, read-only view of a live volume.
 //! This is what lets you image C: while Windows is running on it.
-use crate::util::{ps, Res};
+use crate::util::{Res, ps};
 
 pub struct Snapshot {
     pub id: String,
@@ -35,7 +35,11 @@ fn vss_error(code: &str) -> String {
 
 impl Snapshot {
     pub fn create(volume: &str) -> Res<Snapshot> {
-        let vol = if volume.ends_with('\\') { volume.to_string() } else { format!("{volume}\\") };
+        let vol = if volume.ends_with('\\') {
+            volume.to_string()
+        } else {
+            format!("{volume}\\")
+        };
         // Report the code rather than failing the script, so the caller gets
         // one line instead of PowerShell's rendering of the whole snippet.
         let out = ps(&format!(

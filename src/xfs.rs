@@ -7,8 +7,8 @@
 //!
 //! Read-only. Same reasoning as ext4: writing means the log, and a
 //! half-understood log destroys filesystems.
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 const MAGIC: &[u8; 4] = b"XFSB";
 const INODE_MAGIC: u16 = 0x494E; // "IN"
@@ -145,7 +145,11 @@ pub fn data_entries(block: &[u8], from: usize, to: usize, ftype: bool) -> Vec<Di
         }
         let name = String::from_utf8_lossy(&block[off + 9..off + 9 + namelen]).into_owned();
         let ft = if ftype { block[off + 9 + namelen] } else { 0 };
-        v.push(DirEntry { inode, name, is_dir: ftype && ft == 2 });
+        v.push(DirEntry {
+            inode,
+            name,
+            is_dir: ftype && ft == 2,
+        });
         // inode + namelen + name + optional ftype + 2-byte tag, to an 8-byte
         // boundary.
         let len = 8 + 1 + namelen + if ftype { 1 } else { 0 } + 2;
@@ -236,9 +240,7 @@ impl<'a> Xfs<'a> {
         let ag = ino >> (self.agblklog + self.inopblog);
         let blk = (ino >> self.inopblog) & ((1u64 << self.agblklog) - 1);
         let slot = ino & ((1u64 << self.inopblog) - 1);
-        let off = self.base
-            + (ag * self.agblocks + blk) * self.blocksize
-            + slot * self.inodesize;
+        let off = self.base + (ag * self.agblocks + blk) * self.blocksize + slot * self.inodesize;
         let raw = self.read_at(off, self.inodesize as usize)?;
         if b16(&raw, 0) != INODE_MAGIC {
             return Err(format!("inode {ino} has no IN magic; wrong offset or damaged").into());
@@ -268,9 +270,11 @@ impl<'a> Xfs<'a> {
         match ino[5] {
             FMT_EXTENTS => {}
             FMT_LOCAL => return Ok(Vec::new()),
-            _ => return Err("XFS b-tree forks are not supported yet -- \
+            _ => {
+                return Err("XFS b-tree forks are not supported yet -- \
                              this file or directory is too large or too fragmented"
-                .into()),
+                    .into());
+            }
         }
         // Read records until they run out rather than trusting a count.
         // di_nextents used to sit at 0x4c, but the NREXT64 feature -- on by
@@ -331,10 +335,7 @@ impl<'a> Xfs<'a> {
         let mut out = Vec::new();
         for e in self.extents_of(&raw)? {
             for i in 0..e.count {
-                let block = self.read_at(
-                    self.fsb_offset(e.start + i),
-                    self.blocksize as usize,
-                )?;
+                let block = self.read_at(self.fsb_offset(e.start + i), self.blocksize as usize)?;
                 let magic = b32(&block, 0);
                 // Header size and where the entries stop both depend on which
                 // kind of directory block this is.
@@ -362,7 +363,10 @@ impl<'a> Xfs<'a> {
     pub fn resolve(&self, path: &str) -> Res<(u64, bool)> {
         let mut ino = self.rootino;
         let mut is_dir = true;
-        for part in path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+        for part in path
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
             let hit = self
                 .read_dir(ino)?
                 .into_iter()
@@ -399,7 +403,11 @@ mod tests {
         let r = extent(7, 0x1234_5678, 9, false);
         assert_eq!(
             decode_extent(&r),
-            Some(Extent { logical: 7, start: 0x1234_5678, count: 9 })
+            Some(Extent {
+                logical: 7,
+                start: 0x1234_5678,
+                count: 9
+            })
         );
         // a start block big enough to occupy bits of the high word
         let r = extent(0, 0x7_FFFF_FFFF_FFFF, 1, false);
@@ -411,7 +419,11 @@ mod tests {
         // allocated but never written: reads as zeros, so taking the blocks
         // would return whatever was there before
         assert_eq!(decode_extent(&extent(0, 1000, 4, true)), None);
-        assert_eq!(decode_extent(&extent(0, 1000, 0, false)), None, "empty extent");
+        assert_eq!(
+            decode_extent(&extent(0, 1000, 0, false)),
+            None,
+            "empty extent"
+        );
         assert_eq!(decode_extent(&[0u8; 8]), None, "truncated record");
     }
 
@@ -439,8 +451,22 @@ mod tests {
         let d = sf(&[("etc", 133, 2), ("hosts", 200, 1)], false, true);
         let e = shortform_entries(&d, true);
         assert_eq!(e.len(), 2);
-        assert_eq!(e[0], DirEntry { inode: 133, name: "etc".into(), is_dir: true });
-        assert_eq!(e[1], DirEntry { inode: 200, name: "hosts".into(), is_dir: false });
+        assert_eq!(
+            e[0],
+            DirEntry {
+                inode: 133,
+                name: "etc".into(),
+                is_dir: true
+            }
+        );
+        assert_eq!(
+            e[1],
+            DirEntry {
+                inode: 200,
+                name: "hosts".into(),
+                is_dir: false
+            }
+        );
 
         // the same directory with 8-byte inode numbers: a different stride,
         // and reading it with the wrong one yields nonsense
@@ -467,7 +493,7 @@ mod tests {
             v.push(ft);
         }
         v.extend_from_slice(&[0, 0]); // tag
-        while v.len() % 8 != 0 {
+        while !v.len().is_multiple_of(8) {
             v.push(0);
         }
         v

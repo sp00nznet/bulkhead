@@ -17,8 +17,8 @@ use windows::Win32::Storage::IscsiDisc::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-use crate::util::{Ctx, Res};
 use crate::Raw;
+use crate::util::{Ctx, Res};
 
 const CMD_SANITIZE: u8 = 0xB4;
 
@@ -206,18 +206,22 @@ fn send(disk: &Raw, cdb: [u8; 16], what: &str) -> Res<Option<Regs>> {
     let sz = size_of::<ScsiReq>() as u32;
     unsafe {
         DeviceIoControl(
-            disk.0, IOCTL_SCSI_PASS_THROUGH_DIRECT,
-            Some(&mut req as *mut _ as *mut c_void), sz,
-            Some(&mut req as *mut _ as *mut c_void), sz,
-            Some(&mut ret), None,
-        ).ctx(what)?;
+            disk.0,
+            IOCTL_SCSI_PASS_THROUGH_DIRECT,
+            Some(&mut req as *mut _ as *mut c_void),
+            sz,
+            Some(&mut req as *mut _ as *mut c_void),
+            sz,
+            Some(&mut ret),
+            None,
+        )
+        .ctx(what)?;
     }
     let regs = ata_regs(&req.sense);
-    if let Some(r) = regs {
-        if r.refused() {
-            return Err(format!("{what}: drive refused it (error register {:#04x})",
-                               r.error).into());
-        }
+    if let Some(r) = regs
+        && r.refused()
+    {
+        return Err(format!("{what}: drive refused it (error register {:#04x})", r.error).into());
     }
     // No descriptor is not evidence of refusal, and reporting a failure that
     // did not happen is the worse error here: it would say a sanitize failed
@@ -228,14 +232,22 @@ fn send(disk: &Raw, cdb: [u8; 16], what: &str) -> Res<Option<Regs>> {
 /// Start a sanitize. Returns as soon as the drive accepts it; the work happens
 /// afterwards and is followed with `status`.
 pub fn start(disk: &Raw, kind: Kind) -> Res<()> {
-    send(disk, cdb16(kind.feature(), kind.count(), kind.lba(), CMD_SANITIZE), "SANITIZE")?;
+    send(
+        disk,
+        cdb16(kind.feature(), kind.count(), kind.lba(), CMD_SANITIZE),
+        "SANITIZE",
+    )?;
     Ok(())
 }
 
 /// How far along the drive is: `(finished, percent)`.
 pub fn status(disk: &Raw) -> Res<(bool, u8)> {
-    let regs = send(disk, cdb16(FEAT_STATUS, 0, 0, CMD_SANITIZE), "SANITIZE STATUS")?
-        .ok_or("SANITIZE STATUS: the drive returned no registers")?;
+    let regs = send(
+        disk,
+        cdb16(FEAT_STATUS, 0, 0, CMD_SANITIZE),
+        "SANITIZE STATUS",
+    )?
+    .ok_or("SANITIZE STATUS: the drive returned no registers")?;
     Ok(progress_of(progress_word(&regs)))
 }
 
@@ -276,7 +288,11 @@ mod tests {
     fn registers_split_low_and_high_bytes() {
         let c = cdb16(0x0011, 0, KEY_CRYPTO, CMD_SANITIZE);
         assert_eq!(c[0], SCSI_ATA_PASS_THROUGH_16);
-        assert_eq!(c[1] & 0x01, 1, "EXTEND: without it the high half is dropped");
+        assert_eq!(
+            c[1] & 0x01,
+            1,
+            "EXTEND: without it the high half is dropped"
+        );
         assert_eq!((c[1] >> 1) & 0x0F, PROTOCOL_NON_DATA);
         assert_eq!(c[2], CK_COND, "without it a refusal is invisible");
         assert_eq!([c[3], c[4]], [0x00, 0x11], "feature high then low");
@@ -303,9 +319,10 @@ mod tests {
     fn reads_the_registers_a_sanitize_capable_drive_returns() {
         // WDC WUH721818ALE6L4, idle: no error, and the 0xFFFF "not in
         // progress" sentinel in LBA rather than in count.
-        let sense = [0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E,
-                     0x09, 0x0C, 0x01, 0x00, 0x00, 0x00, 0x00, 0xFF,
-                     0x00, 0xFF, 0x00, 0x00, 0x00, 0x50];
+        let sense = [
+            0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E, 0x09, 0x0C, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x50,
+        ];
         let r = ata_regs(&sense).expect("ATA status descriptor");
         assert_eq!(r.status, 0x50);
         assert_eq!(r.error, 0x00);
@@ -320,9 +337,10 @@ mod tests {
     fn a_drive_without_sanitize_comes_back_aborted() {
         // Samsung PM851, which advertises no sanitize: ERR set, ABRT in the
         // error register. The command reached the drive and the drive said no.
-        let sense = [0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E,
-                     0x09, 0x0C, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x00, 0x00, 0xE0, 0x51];
+        let sense = [
+            0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0E, 0x09, 0x0C, 0x01, 0x04, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x51,
+        ];
         let r = ata_regs(&sense).expect("ATA status descriptor");
         assert_eq!(r.error & 0x04, 0x04, "ABRT");
         assert!(r.refused(), "a refusal must not read as success");
@@ -361,8 +379,15 @@ mod tests {
 
     #[test]
     fn method_names_map_to_kinds() {
-        assert_eq!(Kind::parse("ata-sanitize-crypto"), Some(Kind::CryptoScramble));
+        assert_eq!(
+            Kind::parse("ata-sanitize-crypto"),
+            Some(Kind::CryptoScramble)
+        );
         assert_eq!(Kind::parse("ata-sanitize-block"), Some(Kind::BlockErase));
-        assert_eq!(Kind::parse("overwrite"), None, "that is the software fallback");
+        assert_eq!(
+            Kind::parse("overwrite"),
+            None,
+            "that is the software fallback"
+        );
     }
 }

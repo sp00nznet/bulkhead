@@ -10,9 +10,9 @@
 //! differently but describe the same thing -- a number, a place, a length and
 //! something to call it -- so sharing the shape means `part list` and
 //! `identify` need no idea which kind of disk they are looking at.
+use crate::Raw;
 use crate::gpt::Entry;
 use crate::util::Res;
-use crate::Raw;
 
 const SIG_AT: usize = 510;
 const TABLE_AT: usize = 446;
@@ -133,7 +133,9 @@ pub fn parse(lba0: &[u8], sector: u64, mut read: impl FnMut(u64) -> Res<Vec<u8>>
                 break;
             }
             let here = slots(&sec);
-            let Some(part) = here.iter().find(|s| !EXTENDED.contains(&s.kind)) else { break };
+            let Some(part) = here.iter().find(|s| !EXTENDED.contains(&s.kind)) else {
+                break;
+            };
             let start = next + part.start as u64;
             out.push(Entry {
                 number,
@@ -218,7 +220,9 @@ mod tests {
         ]);
 
         let got = parse(&lba0, 512, |at| {
-            disk.get(&at).cloned().ok_or_else(|| "no such sector".into())
+            disk.get(&at)
+                .cloned()
+                .ok_or_else(|| "no such sector".into())
         });
 
         assert_eq!(got.len(), 3, "one primary and two logicals");
@@ -228,7 +232,11 @@ mod tests {
         assert_eq!(got[1].name, "Linux");
         assert_eq!(got[2].start_lba, 15_063, "second logical, via the link");
         assert_eq!(got[2].name, "Linux swap");
-        assert_eq!((got[1].number, got[2].number), (5, 6), "logicals start at 5");
+        assert_eq!(
+            (got[1].number, got[2].number),
+            (5, 6),
+            "logicals start at 5"
+        );
     }
 
     #[test]
@@ -239,7 +247,9 @@ mod tests {
         let loops = sector(&[(0x83, 63, 500), (0x05, 0, 5_000)]); // link back to base
         let disk: HashMap<u64, Vec<u8>> = HashMap::from([(100 * 512, loops)]);
         let got = parse(&lba0, 512, |at| {
-            disk.get(&at).cloned().ok_or_else(|| "no such sector".into())
+            disk.get(&at)
+                .cloned()
+                .ok_or_else(|| "no such sector".into())
         });
         assert_eq!(got.len(), 1, "the one logical, and no spinning");
     }

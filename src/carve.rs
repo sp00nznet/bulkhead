@@ -10,8 +10,8 @@
 //! after the first fragment. Prefer `undelete` whenever the MFT survives.
 use std::path::Path;
 
-use crate::util::{human, Res};
 use crate::Raw;
+use crate::util::{Res, human};
 
 /// Files start where the filesystem put them, and filesystems allocate in
 /// clusters. Checking one position in 512 rather than every byte is what makes
@@ -30,6 +30,10 @@ pub struct Sig {
     pub max: u64,
 }
 
+// Kept as a table on purpose: one row per format, aligned, is how this is read
+// and checked against a magic-number reference. rustfmt would give each field
+// its own line and turn fourteen rows into a hundred.
+#[rustfmt::skip]
 pub const SIGS: &[Sig] = &[
     Sig { magic: &[0xFF, 0xD8, 0xFF], at: 0, ext: "jpg",
           footer: Some(&[0xFF, 0xD9]), max: 32 << 20 },
@@ -57,7 +61,9 @@ pub const SIGS: &[Sig] = &[
 /// the end. Without one, all of it: the caller has already capped the length,
 /// and trailing slack is better than a truncated file.
 pub fn find_end(data: &[u8], sig: &Sig) -> usize {
-    let Some(f) = sig.footer else { return data.len() };
+    let Some(f) = sig.footer else {
+        return data.len();
+    };
     let from = sig.at + sig.magic.len();
     if data.len() < from + f.len() {
         return data.len();
@@ -115,8 +121,12 @@ pub fn carve(disk: &Raw, size: u64, out_dir: &Path, limit: usize) -> Res<usize> 
 
                 let name = out_dir.join(format!("{:06}_{}.{}", found, start / STEP, sig.ext));
                 std::fs::write(&name, &file)?;
-                eprintln!("\r  {} at {} ({})            ",
-                          sig.ext, human(start), human(file.len() as u64));
+                eprintln!(
+                    "\r  {} at {} ({})            ",
+                    sig.ext,
+                    human(start),
+                    human(file.len() as u64)
+                );
                 found += 1;
                 skip_to = start + file.len() as u64;
                 break;

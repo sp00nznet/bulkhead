@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::util::{ps, Res};
+use crate::util::{Res, ps};
 
 /// Base WinPE cannot run `Initialize-Disk` / `New-Partition` / `Set-Disk`,
 /// which is how `image` lays out its target. These are the documented
@@ -43,7 +43,10 @@ echo.
 fn sh(what: &str, script: &str) -> Res<()> {
     eprintln!("[*] {what}");
     let bat = std::env::temp_dir().join(format!("bulkhead-{}.bat", std::process::id()));
-    std::fs::write(&bat, format!("@echo off\r\n{}\r\n", script.replace('\n', "\r\n")))?;
+    std::fs::write(
+        &bat,
+        format!("@echo off\r\n{}\r\n", script.replace('\n', "\r\n")),
+    )?;
     // Inherited stdio on purpose -- DISM runs for minutes and its progress
     // meter is the only sign it is alive.
     let st = Command::new("cmd").arg("/c").arg(&bat).status()?;
@@ -55,7 +58,11 @@ fn sh(what: &str, script: &str) -> Res<()> {
 }
 
 fn need(p: &Path, what: &str) -> Res<()> {
-    if p.exists() { Ok(()) } else { Err(format!("{what} not found at {}", p.display()).into()) }
+    if p.exists() {
+        Ok(())
+    } else {
+        Err(format!("{what} not found at {}", p.display()).into())
+    }
 }
 
 /// Where the ADK might be.
@@ -103,7 +110,10 @@ pub fn build(out_iso: &str) -> Res<()> {
         .map(|r| r.join("Assessment and Deployment Kit"))
         .find(|a| a.join("Deployment Tools").join("DandISetEnv.bat").exists())
         .ok_or_else(|| {
-            let tried: Vec<String> = roots.iter().map(|r| format!("\n      {}", r.display())).collect();
+            let tried: Vec<String> = roots
+                .iter()
+                .map(|r| format!("\n      {}", r.display()))
+                .collect();
             format!(
                 "Windows ADK not installed.\n    \
                  Get it from https://aka.ms/adk and tick 'Deployment Tools'.\n    \
@@ -124,7 +134,8 @@ pub fn build(out_iso: &str) -> Res<()> {
             "WinPE add-on not installed ({} is missing).\n    \
              It is a separate download from the ADK, same page: https://aka.ms/adk",
             ocs.display()
-        ).into());
+        )
+        .into());
     }
 
     let exe = std::env::current_exe()?;
@@ -138,20 +149,28 @@ pub fn build(out_iso: &str) -> Res<()> {
     if work.exists() {
         eprintln!("[*] clearing {}", work.display());
         let _ = Command::new("dism")
-            .args(["/Unmount-Image", &format!("/MountDir:{}", mount.display()), "/Discard"])
+            .args([
+                "/Unmount-Image",
+                &format!("/MountDir:{}", mount.display()),
+                "/Discard",
+            ])
             .status();
         std::fs::remove_dir_all(&work)?;
     }
 
     let env = format!("call \"{}\"", dandi.display());
-    sh("copype amd64", &format!("{env} && call copype amd64 \"{}\"", work.display()))?;
+    sh(
+        "copype amd64",
+        &format!("{env} && call copype amd64 \"{}\"", work.display()),
+    )?;
     need(&wim, "boot.wim (copype did not produce one)")?;
 
     sh(
         "mounting boot.wim",
         &format!(
             "dism /Mount-Image /ImageFile:\"{}\" /Index:1 /MountDir:\"{}\"",
-            wim.display(), mount.display()
+            wim.display(),
+            mount.display()
         ),
     )?;
 
@@ -160,18 +179,27 @@ pub fn build(out_iso: &str) -> Res<()> {
     let r = populate(&exe, &mount, &ocs);
     let unmount = sh(
         "committing boot.wim",
-        &format!("dism /Unmount-Image /MountDir:\"{}\" /Commit", mount.display()),
+        &format!(
+            "dism /Unmount-Image /MountDir:\"{}\" /Commit",
+            mount.display()
+        ),
     );
     r?;
     unmount?;
 
     sh(
         "building ISO",
-        &format!("{env} && call MakeWinPEMedia /ISO /f \"{}\" \"{out_iso}\"", work.display()),
+        &format!(
+            "{env} && call MakeWinPEMedia /ISO /f \"{}\" \"{out_iso}\"",
+            work.display()
+        ),
     )?;
 
     eprintln!("[+] {out_iso}");
-    eprintln!("    burn it, or:  MakeWinPEMedia /UFD \"{}\" F:", work.display());
+    eprintln!(
+        "    burn it, or:  MakeWinPEMedia /UFD \"{}\" F:",
+        work.display()
+    );
     Ok(())
 }
 
@@ -183,7 +211,8 @@ fn populate(exe: &Path, mount: &Path, ocs: &Path) -> Res<()> {
             &format!("adding {c}"),
             &format!(
                 "dism /Image:\"{}\" /Add-Package /PackagePath:\"{}\"",
-                mount.display(), cab.display()
+                mount.display(),
+                cab.display()
             ),
         )?;
         // Language pack is separate and must follow its component.
@@ -193,7 +222,8 @@ fn populate(exe: &Path, mount: &Path, ocs: &Path) -> Res<()> {
                 &format!("adding {c} (en-us)"),
                 &format!(
                     "dism /Image:\"{}\" /Add-Package /PackagePath:\"{}\"",
-                    mount.display(), lang.display()
+                    mount.display(),
+                    lang.display()
                 ),
             )?;
         }

@@ -14,29 +14,35 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::Storage::IscsiDisc::{
-    ATA_FLAGS_48BIT_COMMAND, ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED,
-    ATA_PASS_THROUGH_DIRECT, IOCTL_ATA_PASS_THROUGH_DIRECT,
-    IOCTL_SCSI_PASS_THROUGH_DIRECT, SCSI_PASS_THROUGH_DIRECT,
+    ATA_FLAGS_48BIT_COMMAND, ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, ATA_PASS_THROUGH_DIRECT,
+    IOCTL_ATA_PASS_THROUGH_DIRECT, IOCTL_SCSI_PASS_THROUGH_DIRECT, SCSI_PASS_THROUGH_DIRECT,
 };
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::core::PCWSTR;
 
 fn main() {
-    let n: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+    let n: u32 = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(1);
     let path = format!(r"\\.\PhysicalDrive{n}");
     let w: Vec<u16> = path.encode_utf16().chain([0]).collect();
     let h = unsafe {
         CreateFileW(
             // Pass-through needs write access on the handle even to read a
             // status register. Nothing below changes the drive.
-            PCWSTR(w.as_ptr()), (GENERIC_READ | GENERIC_WRITE).0,
+            PCWSTR(w.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
         )
     }
     .unwrap_or_else(|e| panic!("open {path}: {e} (elevated?)"));
@@ -49,9 +55,14 @@ fn main() {
     let mut id = [0u8; 8];
     id[5] = 0xA0;
     id[6] = 0xEC; // IDENTIFY DEVICE
-    let r = send(h, "IDENTIFY (0xEC, 28-bit, data-in)",
-                 ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_DATA_IN as u16,
-                 [0; 8], id, Some(&mut buf));
+    let r = send(
+        h,
+        "IDENTIFY (0xEC, 28-bit, data-in)",
+        ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_DATA_IN as u16,
+        [0; 8],
+        id,
+        Some(&mut buf),
+    );
 
     // Control 2: 48-bit, non-data -- the exact shape SANITIZE STATUS uses,
     // with a harmless opcode. Verifies one sector at LBA 0, writes nothing.
@@ -61,9 +72,14 @@ fn main() {
     prev[1] = 0; // count high
     cur[5] = 0x40; // LBA mode
     cur[6] = 0x42; // READ VERIFY SECTORS EXT
-    send(h, "READ VERIFY EXT (0x42, 48-bit, non-data)",
-         ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_48BIT_COMMAND as u16,
-         prev, cur, None);
+    send(
+        h,
+        "READ VERIFY EXT (0x42, 48-bit, non-data)",
+        ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_48BIT_COMMAND as u16,
+        prev,
+        cur,
+        None,
+    );
 
     // The subject: same flags, same shape, different opcode.
     let mut cur = [0u8; 8];
@@ -71,9 +87,14 @@ fn main() {
     cur[0] = 0x00; // feature low: SANITIZE STATUS EXT
     cur[5] = 0x40;
     cur[6] = 0xB4; // SANITIZE DEVICE
-    send(h, "SANITIZE STATUS (0xB4, 48-bit, non-data)",
-         ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_48BIT_COMMAND as u16,
-         prev, cur, None);
+    send(
+        h,
+        "SANITIZE STATUS (0xB4, 48-bit, non-data)",
+        ATA_FLAGS_DRDY_REQUIRED as u16 | ATA_FLAGS_48BIT_COMMAND as u16,
+        prev,
+        cur,
+        None,
+    );
 
     if r {
         println!("\nIf the two controls passed and only 0xB4 failed with 50/0x32,");
@@ -107,7 +128,9 @@ fn main() {
     cdb[14] = 0xB4;
     scsi_ata(h, "SANITIZE STATUS (0xB4) tunnelled", cdb, 0);
 
-    unsafe { let _ = CloseHandle(h); }
+    unsafe {
+        let _ = CloseHandle(h);
+    }
 }
 
 /// One SCSI ATA PASS-THROUGH(16) round trip, with the sense buffer that
@@ -143,10 +166,14 @@ fn scsi_ata(h: windows::Win32::Foundation::HANDLE, label: &str, cdb: [u8; 16], d
     let sz = size_of::<Req>() as u32;
     let r = unsafe {
         DeviceIoControl(
-            h, IOCTL_SCSI_PASS_THROUGH_DIRECT,
-            Some(&mut req as *mut _ as *mut c_void), sz,
-            Some(&mut req as *mut _ as *mut c_void), sz,
-            Some(&mut ret), None,
+            h,
+            IOCTL_SCSI_PASS_THROUGH_DIRECT,
+            Some(&mut req as *mut _ as *mut c_void),
+            sz,
+            Some(&mut req as *mut _ as *mut c_void),
+            sz,
+            Some(&mut ret),
+            None,
         )
     };
     match r {
@@ -158,14 +185,24 @@ fn scsi_ata(h: windows::Win32::Foundation::HANDLE, label: &str, cdb: [u8; 16], d
             // lba(31:24), lba(7:0), lba(39:32), lba(15:8), lba(47:40),
             // lba(23:16), device, status].
             let d = &req.sense[8..22];
-            println!("  {label}\n    OK  scsi_status={} sense={:02X?}",
-                     req.spt.ScsiStatus, &req.sense[..22]);
+            println!(
+                "  {label}\n    OK  scsi_status={} sense={:02X?}",
+                req.spt.ScsiStatus,
+                &req.sense[..22]
+            );
             if d[0] == 0x09 {
                 let count = u16::from_be_bytes([d[4], d[5]]);
                 let lba_lo = u16::from_be_bytes([d[9], d[7]]);
-                println!("    ATA regs: status=0x{:02X} error=0x{:02X}{} count=0x{count:04X} lba(15:0)=0x{lba_lo:04X}",
-                         d[13], d[3],
-                         if d[3] & 0x04 != 0 { " ABRT <- drive refused it" } else { "" });
+                println!(
+                    "    ATA regs: status=0x{:02X} error=0x{:02X}{} count=0x{count:04X} lba(15:0)=0x{lba_lo:04X}",
+                    d[13],
+                    d[3],
+                    if d[3] & 0x04 != 0 {
+                        " ABRT <- drive refused it"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
         Err(e) => println!("  {label}\n    FAIL  {e}"),
@@ -173,8 +210,12 @@ fn scsi_ata(h: windows::Win32::Foundation::HANDLE, label: &str, cdb: [u8; 16], d
 }
 
 fn send(
-    h: windows::Win32::Foundation::HANDLE, label: &str, flags: u16,
-    prev: [u8; 8], cur: [u8; 8], data: Option<&mut Vec<u8>>,
+    h: windows::Win32::Foundation::HANDLE,
+    label: &str,
+    flags: u16,
+    prev: [u8; 8],
+    cur: [u8; 8],
+    data: Option<&mut Vec<u8>>,
 ) -> bool {
     let len = data.as_ref().map(|d| d.len()).unwrap_or(0);
     let mut apt = ATA_PASS_THROUGH_DIRECT {
@@ -182,7 +223,9 @@ fn send(
         AtaFlags: flags,
         TimeOutValue: 30,
         DataTransferLength: len as u32,
-        DataBuffer: data.map(|d| d.as_mut_ptr() as *mut c_void).unwrap_or(std::ptr::null_mut()),
+        DataBuffer: data
+            .map(|d| d.as_mut_ptr() as *mut c_void)
+            .unwrap_or(std::ptr::null_mut()),
         PreviousTaskFile: prev,
         CurrentTaskFile: cur,
         ..Default::default()
@@ -191,10 +234,14 @@ fn send(
     let sz = size_of::<ATA_PASS_THROUGH_DIRECT>() as u32;
     let r = unsafe {
         DeviceIoControl(
-            h, IOCTL_ATA_PASS_THROUGH_DIRECT,
-            Some(&mut apt as *mut _ as *mut c_void), sz,
-            Some(&mut apt as *mut _ as *mut c_void), sz,
-            Some(&mut ret), None,
+            h,
+            IOCTL_ATA_PASS_THROUGH_DIRECT,
+            Some(&mut apt as *mut _ as *mut c_void),
+            sz,
+            Some(&mut apt as *mut _ as *mut c_void),
+            sz,
+            Some(&mut ret),
+            None,
         )
     };
     match r {
@@ -204,8 +251,14 @@ fn send(
             let status = apt.CurrentTaskFile[6];
             let error = apt.CurrentTaskFile[0];
             let aborted = status & 0x01 != 0;
-            println!("  {label}\n    OK  status=0x{status:02X} error=0x{error:02X}{}",
-                     if aborted { "  <- drive ABORTED it (reached the drive, refused)" } else { "" });
+            println!(
+                "  {label}\n    OK  status=0x{status:02X} error=0x{error:02X}{}",
+                if aborted {
+                    "  <- drive ABORTED it (reached the drive, refused)"
+                } else {
+                    ""
+                }
+            );
             true
         }
         Err(e) => {

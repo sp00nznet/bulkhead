@@ -24,7 +24,11 @@ pub fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -125,12 +129,24 @@ pub fn is_gpt(header: &[u8]) -> bool {
     header.len() >= MIN_HEADER && &header[..8] == SIG
 }
 
-pub fn header_size(h: &[u8]) -> usize { u32_at(h, HEADER_SIZE) as usize }
-pub fn entry_size(h: &[u8]) -> usize { u32_at(h, ENTRY_SIZE) as usize }
-pub fn entry_count(h: &[u8]) -> usize { u32_at(h, NUM_ENTRIES) as usize }
-pub fn entry_array_lba(h: &[u8]) -> u64 { u64_at(h, ENTRIES_LBA) }
-pub fn first_usable(h: &[u8]) -> u64 { u64_at(h, FIRST_USABLE) }
-pub fn alternate_lba(h: &[u8]) -> u64 { u64_at(h, ALT_LBA) }
+pub fn header_size(h: &[u8]) -> usize {
+    u32_at(h, HEADER_SIZE) as usize
+}
+pub fn entry_size(h: &[u8]) -> usize {
+    u32_at(h, ENTRY_SIZE) as usize
+}
+pub fn entry_count(h: &[u8]) -> usize {
+    u32_at(h, NUM_ENTRIES) as usize
+}
+pub fn entry_array_lba(h: &[u8]) -> u64 {
+    u64_at(h, ENTRIES_LBA)
+}
+pub fn first_usable(h: &[u8]) -> u64 {
+    u64_at(h, FIRST_USABLE)
+}
+pub fn alternate_lba(h: &[u8]) -> u64 {
+    u64_at(h, ALT_LBA)
+}
 
 /// Turn a copy of the primary header into the backup one. Caller reseals.
 pub fn make_backup(h: &mut [u8], last_lba: u64, entries_lba: u64) {
@@ -138,7 +154,9 @@ pub fn make_backup(h: &mut [u8], last_lba: u64, entries_lba: u64) {
     put(h, ALT_LBA, 1);
     put(h, ENTRIES_LBA, entries_lba);
 }
-pub fn last_usable(h: &[u8]) -> u64 { u64_at(h, LAST_USABLE) }
+pub fn last_usable(h: &[u8]) -> u64 {
+    u64_at(h, LAST_USABLE)
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Entry {
@@ -151,7 +169,9 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn sectors(&self) -> u64 { self.end_lba - self.start_lba + 1 }
+    pub fn sectors(&self) -> u64 {
+        self.end_lba - self.start_lba + 1
+    }
 }
 
 /// Occupied entries only, **in disk order**. An all-zero type GUID means the
@@ -176,7 +196,9 @@ pub fn entries(header: &[u8], array: &[u8]) -> Vec<Entry> {
                 return None;
             }
             let utf16: Vec<u16> = e[E_NAME..sz]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .take_while(|&c| c != 0)
                 .collect();
@@ -228,8 +250,8 @@ pub fn guid_bytes(s: &str) -> Option<[u8; 16]> {
         Some(hi << 4 | lo)
     };
     let mut raw = [0u8; 16];
-    for i in 0..16 {
-        raw[i] = n(i * 2)?;
+    for (i, b) in raw.iter_mut().enumerate() {
+        *b = n(i * 2)?;
     }
     let mut g = raw;
     g[0..4].copy_from_slice(&[raw[3], raw[2], raw[1], raw[0]]);
@@ -263,12 +285,7 @@ pub struct Table {
 /// first sectors of a partition it creates, so that stale filesystem metadata
 /// is not picked up. Right for making a new partition, fatal for rebuilding a
 /// table over filesystems that are already there.
-pub fn build(
-    disk_size: u64,
-    sector: u64,
-    disk_guid: [u8; 16],
-    parts: &[NewPart],
-) -> Option<Table> {
+pub fn build(disk_size: u64, sector: u64, disk_guid: [u8; 16], parts: &[NewPart]) -> Option<Table> {
     const COUNT: u64 = 128;
     const SIZE: u64 = 128;
     if sector < 512 || disk_size < sector * 100 || parts.len() as u64 > COUNT {
@@ -279,7 +296,10 @@ pub fn build(
     let entries_lba = 2;
     let first_usable = 2 + entries_sectors;
     let last_usable = last_lba.checked_sub(entries_sectors + 1)?;
-    if parts.iter().any(|p| p.start_lba < first_usable || p.end_lba > last_usable) {
+    if parts
+        .iter()
+        .any(|p| p.start_lba < first_usable || p.end_lba > last_usable)
+    {
         return None;
     }
 
@@ -375,9 +395,7 @@ mod tests {
         let sz = 128usize;
         let mut array = vec![0u8; 128 * sz];
         // (table index, start_lba) -- index 3 lives between 1 and 2 on disk.
-        for &(idx, start, end) in &[(1usize, 100u64, 199u64),
-                                    (2, 400, 499),
-                                    (3, 200, 399)] {
+        for &(idx, start, end) in &[(1usize, 100u64, 199u64), (2, 400, 499), (3, 200, 399)] {
             let e = &mut array[(idx - 1) * sz..idx * sz];
             e[E_TYPE] = 0xAB; // any non-zero type GUID marks the slot used
             put(e, E_START, start);
@@ -385,10 +403,16 @@ mod tests {
         }
 
         let got = entries(&h, &array);
-        assert_eq!(got.iter().map(|e| e.start_lba).collect::<Vec<_>>(),
-                   [100, 200, 400], "must be sorted by position on the disk");
-        assert_eq!(got.iter().map(|e| e.number).collect::<Vec<_>>(),
-                   [1, 3, 2], "but each keeps its own table index");
+        assert_eq!(
+            got.iter().map(|e| e.start_lba).collect::<Vec<_>>(),
+            [100, 200, 400],
+            "must be sorted by position on the disk"
+        );
+        assert_eq!(
+            got.iter().map(|e| e.number).collect::<Vec<_>>(),
+            [1, 3, 2],
+            "but each keeps its own table index"
+        );
 
         // The bug this guards: walk the sorted list and there is no gap.
         let mut pos = 100;
@@ -448,7 +472,15 @@ mod tests {
         let a = array(&[(2048, 4095), (4096, 20479)]);
         let got = entries(&h, &a);
         assert_eq!(got.len(), 2, "empty slots must not be reported");
-        assert_eq!(got[0], Entry { number: 1, start_lba: 2048, end_lba: 4095, name: "p1".into() });
+        assert_eq!(
+            got[0],
+            Entry {
+                number: 1,
+                start_lba: 2048,
+                end_lba: 4095,
+                name: "p1".into()
+            }
+        );
         assert_eq!(got[1].number, 2);
         assert_eq!(got[1].sectors(), 16384);
     }
@@ -467,8 +499,14 @@ mod tests {
         // the untouched neighbour stays put
         assert_eq!(entries(&h, &a)[0].start_lba, 2048);
 
-        assert!(set_start(&h, &mut a, 0, 100).is_none(), "entries are 1-based");
-        assert!(set_start(&h, &mut a, 129, 100).is_none(), "past the end of the array");
+        assert!(
+            set_start(&h, &mut a, 0, 100).is_none(),
+            "entries are 1-based"
+        );
+        assert!(
+            set_start(&h, &mut a, 129, 100).is_none(),
+            "past the end of the array"
+        );
     }
 
     #[test]
@@ -487,7 +525,11 @@ mod tests {
         let stored = u32_at(&h, HEADER_CRC) as u32;
         let mut probe = h.clone();
         probe[HEADER_CRC..HEADER_CRC + 4].fill(0);
-        assert_eq!(stored, crc32(&probe), "header CRC must cover the new entry CRC");
+        assert_eq!(
+            stored,
+            crc32(&probe),
+            "header CRC must cover the new entry CRC"
+        );
     }
 
     #[test]
@@ -496,8 +538,10 @@ mod tests {
         let g = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
         assert_eq!(
             g,
-            [0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
-             0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7]
+            [
+                0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26,
+                0x99, 0xC7
+            ]
         );
         assert_eq!(guid_bytes("not a guid"), None);
         assert_eq!(guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699}"), None);
@@ -508,10 +552,20 @@ mod tests {
         let ty = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
         let uq = guid_bytes("{11111111-2222-3333-4444-555555555555}").unwrap();
         let parts = vec![
-            NewPart { type_guid: ty, unique_guid: uq, start_lba: 2048, end_lba: 200_000,
-                      name: "recovered1".into() },
-            NewPart { type_guid: ty, unique_guid: uq, start_lba: 200_001, end_lba: 400_000,
-                      name: "recovered2".into() },
+            NewPart {
+                type_guid: ty,
+                unique_guid: uq,
+                start_lba: 2048,
+                end_lba: 200_000,
+                name: "recovered1".into(),
+            },
+            NewPart {
+                type_guid: ty,
+                unique_guid: uq,
+                start_lba: 200_001,
+                end_lba: 400_000,
+                name: "recovered2".into(),
+            },
         ];
         let disk = 1u64 << 30;
         let t = build(disk, 512, uq, &parts).expect("should build");
@@ -543,9 +597,15 @@ mod tests {
     #[test]
     fn build_refuses_partitions_outside_the_usable_area() {
         let ty = guid_bytes("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}").unwrap();
-        let mk = |start, end| vec![NewPart {
-            type_guid: ty, unique_guid: ty, start_lba: start, end_lba: end, name: String::new(),
-        }];
+        let mk = |start, end| {
+            vec![NewPart {
+                type_guid: ty,
+                unique_guid: ty,
+                start_lba: start,
+                end_lba: end,
+                name: String::new(),
+            }]
+        };
         let disk = 1u64 << 30;
         // inside the entry array
         assert!(build(disk, 512, ty, &mk(2, 1000)).is_none());

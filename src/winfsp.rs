@@ -14,15 +14,16 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HMODULE, STATUS_ACCESS_DENIED, STATUS_END_OF_FILE,
-                                 STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS};
+use windows::Win32::Foundation::{
+    HMODULE, STATUS_ACCESS_DENIED, STATUS_END_OF_FILE, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::core::PCWSTR;
 
-use crate::util::{wide, Res};
+use crate::util::{Res, wide};
 
 const DLL: &str = r"C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll";
 
@@ -108,12 +109,27 @@ struct Interface {
         unsafe extern "system" fn(*mut c_void, PCWSTR, *mut u32, *mut c_void, *mut u64) -> i32,
     >,
     create: Option<
-        unsafe extern "system" fn(*mut c_void, PCWSTR, u32, u32, u32, *mut c_void, u64,
-                                  *mut *mut c_void, *mut FileInfo) -> i32,
+        unsafe extern "system" fn(
+            *mut c_void,
+            PCWSTR,
+            u32,
+            u32,
+            u32,
+            *mut c_void,
+            u64,
+            *mut *mut c_void,
+            *mut FileInfo,
+        ) -> i32,
     >,
     open: Option<
-        unsafe extern "system" fn(*mut c_void, PCWSTR, u32, u32, *mut *mut c_void, *mut FileInfo)
-            -> i32,
+        unsafe extern "system" fn(
+            *mut c_void,
+            PCWSTR,
+            u32,
+            u32,
+            *mut *mut c_void,
+            *mut FileInfo,
+        ) -> i32,
     >,
     overwrite: Option<
         unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u8, u64, *mut FileInfo) -> i32,
@@ -125,7 +141,8 @@ struct Interface {
     >,
     write: *const c_void,
     flush: *const c_void,
-    get_file_info: Option<unsafe extern "system" fn(*mut c_void, *mut c_void, *mut FileInfo) -> i32>,
+    get_file_info:
+        Option<unsafe extern "system" fn(*mut c_void, *mut c_void, *mut FileInfo) -> i32>,
     set_basic_info: *const c_void,
     set_file_size: *const c_void,
     can_delete: *const c_void,
@@ -133,8 +150,15 @@ struct Interface {
     get_security: *const c_void,
     set_security: *const c_void,
     read_directory: Option<
-        unsafe extern "system" fn(*mut c_void, *mut c_void, PCWSTR, PCWSTR, *mut c_void, u32,
-                                  *mut u32) -> i32,
+        unsafe extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            PCWSTR,
+            PCWSTR,
+            *mut c_void,
+            u32,
+            *mut u32,
+        ) -> i32,
     >,
     resolve_reparse_points: *const c_void,
     get_reparse_point: *const c_void,
@@ -173,8 +197,12 @@ struct DirInfo {
 
 // --- the parts of WinFsp we call --------------------------------------------
 
-type FspCreate = unsafe extern "system" fn(PCWSTR, *const VolumeParams, *const Interface,
-                                           *mut *mut c_void) -> i32;
+type FspCreate = unsafe extern "system" fn(
+    PCWSTR,
+    *const VolumeParams,
+    *const Interface,
+    *mut *mut c_void,
+) -> i32;
 type FspSetMountPoint = unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32;
 type FspStartDispatcher = unsafe extern "system" fn(*mut c_void, u32) -> i32;
 type FspStopDispatcher = unsafe extern "system" fn(*mut c_void);
@@ -205,27 +233,37 @@ unsafe fn sym(m: HMODULE, name: &str) -> Res<*const c_void> {
 fn load() -> Res<Api> {
     unsafe {
         let m = LoadLibraryW(PCWSTR(wide(DLL).as_ptr())).map_err(|e| {
-            format!("WinFsp is not installed ({e}).\n    \
-                     Get it from https://winfsp.dev or: winget install WinFsp.WinFsp")
+            format!(
+                "WinFsp is not installed ({e}).\n    \
+                     Get it from https://winfsp.dev or: winget install WinFsp.WinFsp"
+            )
         })?;
         Ok(Api {
-            create: std::mem::transmute::<*const c_void, FspCreate>(
-                sym(m, "FspFileSystemCreate")?),
-            set_mount_point: std::mem::transmute::<*const c_void, FspSetMountPoint>(
-                sym(m, "FspFileSystemSetMountPoint")?),
-            start_dispatcher: std::mem::transmute::<*const c_void, FspStartDispatcher>(
-                sym(m, "FspFileSystemStartDispatcher")?),
-            stop_dispatcher: std::mem::transmute::<*const c_void, FspStopDispatcher>(
-                sym(m, "FspFileSystemStopDispatcher")?),
-            delete: std::mem::transmute::<*const c_void, FspDelete>(
-                sym(m, "FspFileSystemDelete")?),
-            add_dir_info: std::mem::transmute::<*const c_void, FspAddDirInfo>(
-                sym(m, "FspFileSystemAddDirInfo")?),
+            create: std::mem::transmute::<*const c_void, FspCreate>(sym(m, "FspFileSystemCreate")?),
+            set_mount_point: std::mem::transmute::<*const c_void, FspSetMountPoint>(sym(
+                m,
+                "FspFileSystemSetMountPoint",
+            )?),
+            start_dispatcher: std::mem::transmute::<*const c_void, FspStartDispatcher>(sym(
+                m,
+                "FspFileSystemStartDispatcher",
+            )?),
+            stop_dispatcher: std::mem::transmute::<*const c_void, FspStopDispatcher>(sym(
+                m,
+                "FspFileSystemStopDispatcher",
+            )?),
+            delete: std::mem::transmute::<*const c_void, FspDelete>(sym(m, "FspFileSystemDelete")?),
+            add_dir_info: std::mem::transmute::<*const c_void, FspAddDirInfo>(sym(
+                m,
+                "FspFileSystemAddDirInfo",
+            )?),
             // SetDebugLog is an inline helper in the header; the exported one
             // is SetDebugLogF. Neither is required to mount.
-            set_debug_log: sym(m, "FspFileSystemSetDebugLogF").ok()
+            set_debug_log: sym(m, "FspFileSystemSetDebugLogF")
+                .ok()
                 .map(|f| std::mem::transmute::<*const c_void, FspSetDebugLog>(f)),
-            debug_log_set_handle: sym(m, "FspDebugLogSetHandle").ok()
+            debug_log_set_handle: sym(m, "FspDebugLogSetHandle")
+                .ok()
                 .map(|f| std::mem::transmute::<*const c_void, FspDebugLogSetHandle>(f)),
         })
     }
@@ -275,8 +313,12 @@ fn to_path(p: PCWSTR) -> String {
 const FIXED_TIME: u64 = 133_000_000_000_000_000;
 
 fn fill(info: &mut FileInfo, n: &Node) {
-    info.file_attributes =
-        FILE_ATTRIBUTE_READONLY | if n.is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 };
+    info.file_attributes = FILE_ATTRIBUTE_READONLY
+        | if n.is_dir {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            0
+        };
     info.file_size = n.size;
     info.allocation_size = n.size.div_ceil(4096) * 4096;
     info.creation_time = FIXED_TIME;
@@ -289,7 +331,11 @@ fn fill(info: &mut FileInfo, n: &Node) {
 
 fn resolve(m: &Mount, path: &str) -> Option<Node> {
     let (id, is_dir) = m.fs.resolve(path).ok()?;
-    let size = if is_dir { 0 } else { m.fs.size_of(id).unwrap_or(0) };
+    let size = if is_dir {
+        0
+    } else {
+        m.fs.size_of(id).unwrap_or(0)
+    };
     Some(Node { id, is_dir, size })
 }
 
@@ -298,22 +344,35 @@ fn resolve(m: &Mount, path: &str) -> Option<Node> {
 /// read-only filesystem still has to answer them, and the honest answer is
 /// that the volume is write protected.
 unsafe extern "system" fn cb_create(
-    _fs: *mut c_void, _name: PCWSTR, _opts: u32, _access: u32, _attrs: u32,
-    _sd: *mut c_void, _alloc: u64, _context: *mut *mut c_void, _info: *mut FileInfo,
+    _fs: *mut c_void,
+    _name: PCWSTR,
+    _opts: u32,
+    _access: u32,
+    _attrs: u32,
+    _sd: *mut c_void,
+    _alloc: u64,
+    _context: *mut *mut c_void,
+    _info: *mut FileInfo,
 ) -> i32 {
     STATUS_MEDIA_WRITE_PROTECTED
 }
 
 unsafe extern "system" fn cb_overwrite(
-    _fs: *mut c_void, _context: *mut c_void, _attrs: u32, _replace: u8,
-    _alloc: u64, _info: *mut FileInfo,
+    _fs: *mut c_void,
+    _context: *mut c_void,
+    _attrs: u32,
+    _replace: u8,
+    _alloc: u64,
+    _info: *mut FileInfo,
 ) -> i32 {
     STATUS_MEDIA_WRITE_PROTECTED
 }
 
 unsafe extern "system" fn cb_get_volume_info(_fs: *mut c_void, out: *mut VolumeInfo) -> i32 {
     let g = MOUNT.lock().unwrap();
-    let Some(st) = g.as_ref() else { return STATUS_ACCESS_DENIED.0 };
+    let Some(st) = g.as_ref() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
     let vi = &mut *out;
     vi.total_size = st.total;
     vi.free_size = 0; // read-only: nothing can be written into it
@@ -324,15 +383,26 @@ unsafe extern "system" fn cb_get_volume_info(_fs: *mut c_void, out: *mut VolumeI
 }
 
 unsafe extern "system" fn cb_get_security_by_name(
-    _fs: *mut c_void, name: PCWSTR, attributes: *mut u32,
-    _sd: *mut c_void, sd_size: *mut u64,
+    _fs: *mut c_void,
+    name: PCWSTR,
+    attributes: *mut u32,
+    _sd: *mut c_void,
+    sd_size: *mut u64,
 ) -> i32 {
     let g = MOUNT.lock().unwrap();
-    let Some(m) = g.as_ref() else { return STATUS_ACCESS_DENIED.0 };
-    let Some(n) = resolve(m, &to_path(name)) else { return STATUS_OBJECT_NAME_NOT_FOUND.0 };
+    let Some(m) = g.as_ref() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
+    let Some(n) = resolve(m, &to_path(name)) else {
+        return STATUS_OBJECT_NAME_NOT_FOUND.0;
+    };
     if !attributes.is_null() {
-        *attributes =
-            FILE_ATTRIBUTE_READONLY | if n.is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 };
+        *attributes = FILE_ATTRIBUTE_READONLY
+            | if n.is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0
+            };
     }
     // No security descriptor: WinFsp then grants access by its own default.
     if !sd_size.is_null() {
@@ -342,12 +412,20 @@ unsafe extern "system" fn cb_get_security_by_name(
 }
 
 unsafe extern "system" fn cb_open(
-    _fs: *mut c_void, name: PCWSTR, _create_options: u32, _granted_access: u32,
-    context: *mut *mut c_void, info: *mut FileInfo,
+    _fs: *mut c_void,
+    name: PCWSTR,
+    _create_options: u32,
+    _granted_access: u32,
+    context: *mut *mut c_void,
+    info: *mut FileInfo,
 ) -> i32 {
     let mut g = MOUNT.lock().unwrap();
-    let Some(st) = g.as_mut() else { return STATUS_ACCESS_DENIED.0 };
-    let Some(n) = resolve(st, &to_path(name)) else { return STATUS_OBJECT_NAME_NOT_FOUND.0 };
+    let Some(st) = g.as_mut() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
+    let Some(n) = resolve(st, &to_path(name)) else {
+        return STATUS_OBJECT_NAME_NOT_FOUND.0;
+    };
     fill(&mut *info, &n);
     st.next_handle += 1;
     let h = st.next_handle;
@@ -357,30 +435,44 @@ unsafe extern "system" fn cb_open(
 }
 
 unsafe extern "system" fn cb_close(_fs: *mut c_void, context: *mut c_void) {
-    if let Ok(mut g) = MOUNT.lock() {
-        if let Some(st) = g.as_mut() {
-            st.open.remove(&(context as u64));
-        }
+    if let Ok(mut g) = MOUNT.lock()
+        && let Some(st) = g.as_mut()
+    {
+        st.open.remove(&(context as u64));
     }
 }
 
 unsafe extern "system" fn cb_get_file_info(
-    _fs: *mut c_void, context: *mut c_void, info: *mut FileInfo,
+    _fs: *mut c_void,
+    context: *mut c_void,
+    info: *mut FileInfo,
 ) -> i32 {
     let g = MOUNT.lock().unwrap();
-    let Some(st) = g.as_ref() else { return STATUS_ACCESS_DENIED.0 };
-    let Some(n) = st.open.get(&(context as u64)) else { return STATUS_OBJECT_NAME_NOT_FOUND.0 };
+    let Some(st) = g.as_ref() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
+    let Some(n) = st.open.get(&(context as u64)) else {
+        return STATUS_OBJECT_NAME_NOT_FOUND.0;
+    };
     fill(&mut *info, n);
     STATUS_SUCCESS.0
 }
 
 unsafe extern "system" fn cb_read(
-    _fs: *mut c_void, context: *mut c_void, buffer: *mut c_void,
-    offset: u64, length: u32, transferred: *mut u32,
+    _fs: *mut c_void,
+    context: *mut c_void,
+    buffer: *mut c_void,
+    offset: u64,
+    length: u32,
+    transferred: *mut u32,
 ) -> i32 {
     let g = MOUNT.lock().unwrap();
-    let Some(m) = g.as_ref() else { return STATUS_ACCESS_DENIED.0 };
-    let Some(n) = m.open.get(&(context as u64)) else { return STATUS_OBJECT_NAME_NOT_FOUND.0 };
+    let Some(m) = g.as_ref() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
+    let Some(n) = m.open.get(&(context as u64)) else {
+        return STATUS_OBJECT_NAME_NOT_FOUND.0;
+    };
     if offset >= n.size {
         return STATUS_END_OF_FILE.0;
     }
@@ -388,7 +480,9 @@ unsafe extern "system" fn cb_read(
     // Correct, and fine for browsing or copying off; a large file read near
     // its end pays for the whole thing each time. Per-extent reads are the
     // upgrade if that ever matters.
-    let Ok(data) = m.fs.read_file(n.id) else { return STATUS_END_OF_FILE.0 };
+    let Ok(data) = m.fs.read_file(n.id) else {
+        return STATUS_END_OF_FILE.0;
+    };
     let start = offset as usize;
     if start >= data.len() {
         return STATUS_END_OF_FILE.0;
@@ -401,12 +495,21 @@ unsafe extern "system" fn cb_read(
 }
 
 unsafe extern "system" fn cb_read_directory(
-    _fs: *mut c_void, context: *mut c_void, _pattern: PCWSTR, marker: PCWSTR,
-    buffer: *mut c_void, length: u32, transferred: *mut u32,
+    _fs: *mut c_void,
+    context: *mut c_void,
+    _pattern: PCWSTR,
+    marker: PCWSTR,
+    buffer: *mut c_void,
+    length: u32,
+    transferred: *mut u32,
 ) -> i32 {
-    let Ok(api) = load() else { return STATUS_ACCESS_DENIED.0 };
+    let Ok(api) = load() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
     let g = MOUNT.lock().unwrap();
-    let Some(m) = g.as_ref() else { return STATUS_ACCESS_DENIED.0 };
+    let Some(m) = g.as_ref() else {
+        return STATUS_ACCESS_DENIED.0;
+    };
     let Some(dir) = m.open.get(&(context as u64)).filter(|n| n.is_dir) else {
         return STATUS_OBJECT_NAME_NOT_FOUND.0;
     };
@@ -414,7 +517,11 @@ unsafe extern "system" fn cb_read_directory(
 
     // WinFsp pages long directories: it hands back the last name it saw and
     // expects the listing to resume after it.
-    let after = if marker.is_null() { None } else { marker.to_string().ok() };
+    let after = if marker.is_null() {
+        None
+    } else {
+        marker.to_string().ok()
+    };
     let mut resumed = after.is_none();
 
     for e in entries {
@@ -428,8 +535,19 @@ unsafe extern "system" fn cb_read_directory(
         let mut buf = vec![0u8; std::mem::size_of::<DirInfo>() + name.len() * 2];
         let di = buf.as_mut_ptr() as *mut DirInfo;
         (*di).size = buf.len() as u16;
-        let size = if e.is_dir { 0 } else { m.fs.size_of(e.inode).unwrap_or(0) };
-        fill(&mut (*di).file_info, &Node { id: e.inode, is_dir: e.is_dir, size });
+        let size = if e.is_dir {
+            0
+        } else {
+            m.fs.size_of(e.inode).unwrap_or(0)
+        };
+        fill(
+            &mut (*di).file_info,
+            &Node {
+                id: e.inode,
+                is_dir: e.is_dir,
+                size,
+            },
+        );
         std::ptr::copy_nonoverlapping(
             name.as_ptr() as *const u8,
             buf.as_mut_ptr().add(std::mem::size_of::<DirInfo>()),
@@ -457,15 +575,22 @@ unsafe extern "system" fn on_ctrl_c(_kind: u32) -> windows::core::BOOL {
             (api.stop_dispatcher)(h as *mut c_void);
             (api.delete)(h as *mut c_void);
         }
-        eprintln!("
-[+] unmounted");
+        eprintln!(
+            "
+[+] unmounted"
+        );
     }
     std::process::exit(0);
 }
 
 /// Mount a filesystem at a drive letter or directory, until interrupted.
-pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64,
-             debug: bool) -> Res<()> {
+pub fn mount(
+    fs: crate::FsHandle,
+    mount_point: &str,
+    label: &str,
+    total: u64,
+    debug: bool,
+) -> Res<()> {
     let api = load()?;
 
     *MOUNT.lock().unwrap() = Some(Mount {
@@ -525,7 +650,8 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64,
         unsafe { (api.delete)(handle) };
         return Err(format!(
             "could not mount at {mount_point} ({st:#x}) -- is the letter already in use?"
-        ).into());
+        )
+        .into());
     }
 
     if debug {
@@ -533,8 +659,10 @@ pub fn mount(fs: crate::FsHandle, mount_point: &str, label: &str, total: u64,
         // see which one a filesystem is getting wrong.
         unsafe {
             let stderr = windows::Win32::System::Console::GetStdHandle(
-                windows::Win32::System::Console::STD_ERROR_HANDLE)
-                .map(|h| h.0 as isize).unwrap_or(0);
+                windows::Win32::System::Console::STD_ERROR_HANDLE,
+            )
+            .map(|h| h.0 as isize)
+            .unwrap_or(0);
             if let Some(f) = api.debug_log_set_handle {
                 f(stderr);
             }

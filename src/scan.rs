@@ -8,8 +8,8 @@
 //! Ported from partrevive, which does this on Linux. Every detector re-reads
 //! the device to confirm the magic and returns the volume's *own* recorded
 //! size, so nothing gets truncated by a guess.
-use crate::util::{human, Res};
 use crate::Raw;
+use crate::util::{Res, human};
 
 const SECTOR: u64 = 512;
 /// Anything smaller is noise, not a partition worth restoring.
@@ -58,7 +58,9 @@ impl Candidate {
         self
     }
     pub fn end_lba(&self) -> u64 {
-        self.start_lba.saturating_add(self.sectors).saturating_sub(1)
+        self.start_lba
+            .saturating_add(self.sectors)
+            .saturating_sub(1)
     }
     pub fn bytes(&self) -> u64 {
         self.sectors.saturating_mul(SECTOR)
@@ -98,7 +100,7 @@ fn shl(base: u64, amount: u64) -> Option<u64> {
         return None;
     }
     let v = base << amount;
-    (v >= SECTOR && v <= (1 << 26)).then_some(v)
+    (SECTOR..=(1 << 26)).contains(&v).then_some(v)
 }
 
 /// Convert a count of `unit`-sized blocks into sectors, rejecting anything
@@ -173,10 +175,11 @@ fn ntfs(disk: &Raw, start: u64) -> Option<Candidate> {
     //
     // Missing it is not disqualifying -- a genuinely truncated volume is still
     // worth recovering -- so it raises confidence rather than acting as a veto.
-    if let Some(bak) = at(disk, start.checked_add(total.checked_mul(bps)?)?, 512) {
-        if &bak[3..11] == b"NTFS    " && bak[510..512] == [0x55, 0xAA] {
-            c.confidence += 1;
-        }
+    if let Some(bak) = at(disk, start.checked_add(total.checked_mul(bps)?)?, 512)
+        && &bak[3..11] == b"NTFS    "
+        && bak[510..512] == [0x55, 0xAA]
+    {
+        c.confidence += 1;
     }
     Some(c)
 }
@@ -201,7 +204,11 @@ fn fat(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     let tot16 = le(&bs[0x13..0x15]);
-    let total = if tot16 != 0 { tot16 } else { le(&bs[0x20..0x24]) };
+    let total = if tot16 != 0 {
+        tot16
+    } else {
+        le(&bs[0x20..0x24])
+    };
     (total > 0).then(|| Candidate::new(start, total, "fat", BASIC))
 }
 
@@ -249,10 +256,7 @@ fn btrfs(disk: &Raw, start: u64) -> Option<Candidate> {
         return None;
     }
     let sectors = (total / SECTOR).min(1 << 40);
-    Some(
-        Candidate::new(start, sectors, "btrfs", LINUX)
-            .with_label(cstr(&sb[0x12B..0x22B])),
-    )
+    Some(Candidate::new(start, sectors, "btrfs", LINUX).with_label(cstr(&sb[0x12B..0x22B])))
 }
 
 fn xfs(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -279,7 +283,12 @@ fn f2fs(disk: &Raw, start: u64) -> Option<Candidate> {
     }
     let blocksize = shl(1, le(&sb[0x10..0x14]))?;
     let blocks = le(&sb[0x24..0x2C]);
-    Some(Candidate::new(start, sectors_of(blocks, blocksize)?, "f2fs", LINUX))
+    Some(Candidate::new(
+        start,
+        sectors_of(blocks, blocksize)?,
+        "f2fs",
+        LINUX,
+    ))
 }
 
 fn luks(disk: &Raw, start: u64) -> Option<Candidate> {
@@ -335,7 +344,9 @@ const SIGNATURES: &[(&[u8], u64, Detector)] = &[
 /// either way -- including the corroboration that separates a live filesystem
 /// from a header left behind by a previous one.
 pub fn probe(disk: &Raw, start: u64) -> Option<Candidate> {
-    SIGNATURES.iter().find_map(|(_, _, detect)| detect(disk, start))
+    SIGNATURES
+        .iter()
+        .find_map(|(_, _, detect)| detect(disk, start))
 }
 
 pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
@@ -367,11 +378,15 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
                         continue;
                     }
                     if let Some(c) = detect(disk, start) {
-                        let end = c.end_lba().checked_mul(SECTOR).unwrap_or(u64::MAX);
+                        let end = c.end_lba().saturating_mul(SECTOR);
                         if c.sectors >= MIN_SECTORS && end < disk_size {
                             seen_starts.push(c.start_lba * SECTOR);
-                            eprintln!("\r  found {} at {} ({})      ",
-                                      c.fstype, human(c.start_lba * SECTOR), human(c.bytes()));
+                            eprintln!(
+                                "\r  found {} at {} ({})      ",
+                                c.fstype,
+                                human(c.start_lba * SECTOR),
+                                human(c.bytes())
+                            );
                             found.push(c);
                             break;
                         }
@@ -384,7 +399,11 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
         pos += CHUNK as u64;
         let pct = (pos.min(disk_size)) * 100 / disk_size;
         if pct != last_pct {
-            eprint!("\r  {pct:3}%  {} / {}", human(pos.min(disk_size)), human(disk_size));
+            eprint!(
+                "\r  {pct:3}%  {} / {}",
+                human(pos.min(disk_size)),
+                human(disk_size)
+            );
             use std::io::Write;
             let _ = std::io::stderr().flush();
             last_pct = pct;
@@ -392,7 +411,11 @@ pub fn scan(disk: &Raw, disk_size: u64) -> Res<Vec<Candidate>> {
     }
     // Same shape as the progress line it overwrites, or the tail of the longer
     // one is left behind.
-    eprintln!("\r  100%  {} / {}      ", human(disk_size), human(disk_size));
+    eprintln!(
+        "\r  100%  {} / {}      ",
+        human(disk_size),
+        human(disk_size)
+    );
 
     found.sort_by_key(|c| (c.start_lba, u64::MAX - c.sectors));
     Ok(dedup_contained(found))
@@ -489,7 +512,10 @@ mod tests {
             cand(400_000, 100_000, "ext4"),
         ];
         let (keep, dropped) = resolve(&v);
-        assert_eq!(keep.iter().map(|c| c.start_lba).collect::<Vec<_>>(), vec![2048, 400_000]);
+        assert_eq!(
+            keep.iter().map(|c| c.start_lba).collect::<Vec<_>>(),
+            vec![2048, 400_000]
+        );
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].start_lba, 100_000);
     }
@@ -513,7 +539,10 @@ mod tests {
         live.confidence = 2; // its backup boot sector is still there
         let (keep, dropped) = resolve(&[ghost, live]);
         assert_eq!(keep.len(), 1);
-        assert_eq!(keep[0].start_lba, 237_568, "the ghost must not win on tie-break order");
+        assert_eq!(
+            keep[0].start_lba, 237_568,
+            "the ghost must not win on tie-break order"
+        );
         assert_eq!(dropped[0].start_lba, 32_768);
     }
 
