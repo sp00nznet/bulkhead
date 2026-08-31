@@ -24,6 +24,11 @@ that integration, given away.
 _Rendered with [termshot](https://github.com/sp00nznet/termshot) from a real
 bench run; the drive's serial is a placeholder. Source: [`docs/demo.py`](docs/demo.py)._
 
+And the same engine with a window on it, for the machine that is already
+broken and the person who does not want a command line:
+
+![The bulkhead window](docs/gui-main.png)
+
 ## Why VHDX
 
 The format choice carries most of the feature list, so it's worth being explicit:
