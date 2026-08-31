@@ -19,6 +19,7 @@ mod ext4;
 mod gpt;
 mod hfs;
 mod identify;
+mod mbr;
 pub mod gui;
 pub mod media;
 mod ntfs;
@@ -1410,19 +1411,19 @@ pub fn cmd_identify(target: &str, at: Option<u64>) -> Res<()> {
     let mut spots = vec![(base, String::from("whole device"), 0u64)];
     let mut have_table = false;
     if at.is_none() && disk_arg(target).is_some() {
-        if let Ok(t) = Table::read(&disk) {
+        if let Ok(l) = read_layout(&disk) {
             have_table = true;
-            for p in gpt::entries(&t.header, &t.array) {
+            for p in &l.parts {
                 spots.push((
-                    p.start_lba * t.sector,
+                    p.start_lba * l.sector,
                     format!("partition {} {:?}", p.number, p.name),
-                    p.sectors() * t.sector,
+                    p.sectors() * l.sector,
                 ));
             }
         }
     }
     if !have_table && at.is_none() && disk_arg(target).is_some() {
-        eprintln!("[*] no GPT here -- an MBR disk, or no table at all");
+        eprintln!("[*] no partition table here -- neither GPT nor MBR");
     }
 
     let mut found = 0;
@@ -1645,27 +1646,77 @@ impl Table {
     }
 }
 
+/// The partitions on a disk, however that disk happens to record them.
+///
+/// GPT and MBR are different tables answering the same question, so both come
+/// back as one list in disk order and the commands above are spared the
+/// difference. The usable range comes with it because GPT states it outright
+/// and MBR only implies it.
+struct Layout {
+    parts: Vec<gpt::Entry>,
+    first_usable: u64,
+    last_usable: u64,
+    sector: u64,
+    kind: &'static str,
+}
+
+fn read_layout(disk: &Raw) -> Res<Layout> {
+    let sector = disk.sector_size()? as u64;
+    if let Ok(t) = Table::read(disk) {
+        return Ok(Layout {
+            parts: gpt::entries(&t.header, &t.array),
+            first_usable: gpt::first_usable(&t.header),
+            last_usable: gpt::last_usable(&t.header),
+            sector: t.sector,
+            kind: "GPT",
+        });
+    }
+
+    let mut lba0 = vec![0u8; sector as usize];
+    disk.seek(0)?;
+    disk.read(&mut lba0)?;
+    if !mbr::is_mbr(&lba0) {
+        return Err("no partition table here -- no GPT, and no boot signature for MBR".into());
+    }
+    // A protective MBR with no readable GPT behind it is a damaged GPT disk,
+    // not an MBR one. Saying "MBR disk, no partitions" would send someone
+    // looking in the wrong place for data that is still there.
+    if mbr::is_protective(&lba0) {
+        return Err("this disk has a GPT protective MBR but its GPT would not read -- \
+                    the table is damaged rather than missing. Try: bulkhead scan"
+            .into());
+    }
+
+    Ok(Layout {
+        parts: mbr::entries(disk, &lba0, sector),
+        // MBR declares no usable range. Everything after the boot sector is
+        // fair game, and the disk ends where the disk ends.
+        first_usable: 1,
+        last_usable: disk.len()? / sector - 1,
+        sector,
+        kind: "MBR",
+    })
+}
+
 pub fn cmd_part_list(disk_no: u32) -> Res<()> {
     let disk = Raw::open(&format!(r"\\.\PhysicalDrive{disk_no}"), false).ctx("open disk")?;
     let size = disk.len()?;
-    let t = Table::read(&disk)?;
-    let parts = gpt::entries(&t.header, &t.array);
+    let l = read_layout(&disk)?;
 
-    eprintln!("disk {disk_no}: {} ({}-byte sectors)", human(size), t.sector);
-    let mut pos = gpt::first_usable(&t.header);
-    for p in &parts {
+    eprintln!("disk {disk_no}: {} ({}-byte sectors, {})", human(size), l.sector, l.kind);
+    let mut pos = l.first_usable;
+    for p in &l.parts {
         if p.start_lba > pos {
             eprintln!("     {:>12}  {:>10}  (free)",
-                      human(pos * t.sector), human((p.start_lba - pos) * t.sector));
+                      human(pos * l.sector), human((p.start_lba - pos) * l.sector));
         }
         eprintln!("  {}  {:>12}  {:>10}  {}",
-                  p.number, human(p.start_lba * t.sector), human(p.sectors() * t.sector), p.name);
+                  p.number, human(p.start_lba * l.sector), human(p.sectors() * l.sector), p.name);
         pos = p.end_lba + 1;
     }
-    let end = gpt::last_usable(&t.header);
-    if end > pos {
+    if l.last_usable > pos {
         eprintln!("     {:>12}  {:>10}  (free)",
-                  human(pos * t.sector), human((end - pos + 1) * t.sector));
+                  human(pos * l.sector), human((l.last_usable - pos + 1) * l.sector));
     }
     Ok(())
 }

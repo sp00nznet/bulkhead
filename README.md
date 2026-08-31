@@ -179,7 +179,8 @@ stranded behind a partition table describing the old disk.
 - [x] erase certificate (`--cert`) — JSON for a machine, a printable page for
       a person, written whether it passed or failed
 - [ ] the certificate is unsigned: nothing ties the paper to the record
-- [ ] MBR disks in `part` (GPT only today)
+- [ ] MBR disks are read by `part list` and `identify`, but `part move`
+      still writes GPT only
 - [ ] tested against a real system disk; BitLocker images as ciphertext
 - [ ] the ISO has been built but never booted
 
@@ -191,7 +192,9 @@ The five things people currently pay for. Each one builds on the last:
    Outstanding: `verify`, scheduling/retention/chain merge.
 2. **Partition manager** — **done for GPT.** `part move` is the operation
    nobody gives away; see below for what is deliberately left to Windows.
-   Outstanding: MBR disks are rejected outright.
+   MBR disks are now read rather than refused — `part list` and `identify`
+   follow the extended chain and report logical partitions. Outstanding:
+   nothing writes an MBR, so `part move` is still GPT-only.
 3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
    table is gone and rebuilds it, which is TestDisk's headline feature.
    **done.** `scan` rebuilds a lost partition table, `undelete` recovers files
@@ -215,7 +218,7 @@ gap is.
 
 ```
 > bulkhead part list disk6
-disk 6: 1.0 GB (512-byte sectors)
+disk 6: 1.0 GB (512-byte sectors, GPT)
   1       17.0 KB     16.0 MB  Microsoft reserved partition
   2       16.0 MB    495.9 MB  Basic data partition
          511.9 MB    512.0 MB  (free)
@@ -226,7 +229,7 @@ disk 6: 1.0 GB (512-byte sectors)
 [+] partition 2 now starts at 116.0 MB
 
 > bulkhead part list disk6
-disk 6: 1.0 GB (512-byte sectors)
+disk 6: 1.0 GB (512-byte sectors, GPT)
   1       17.0 KB     16.0 MB  Microsoft reserved partition
           16.0 MB    100.0 MB  (free)
   2      116.0 MB    495.9 MB  Basic data partition
@@ -243,7 +246,7 @@ part that is not:
 | Operation | Who does it |
 |---|---|
 | Shrink / extend a volume | Windows: `Resize-Partition`, Disk Management |
-| MBR→GPT on the system disk | Windows: `mbr2gpt.exe`, since 1703 |
+| MBR→GPT on the *system* disk | Windows: `mbr2gpt.exe`, since 1703 |
 | **Move a partition** | **Nobody, at any price. This.** |
 
 Moving is also the missing half of the operation people actually hit: Windows
