@@ -4,12 +4,13 @@
 //! Windows already mounts one as a drive, already does differencing chains for
 //! incrementals, and already boots one. The paid tools charge for those.
 //!
-//! Two binaries sit on this: `bulkhead` is the desktop build, driven by a person
-//! at a broken machine, and `ballast` is the server build, run unattended. The
-//! split is by *who runs it* -- anything wanting a service account, a credential
-//! store or a schedule belongs to ballast. Everything below is shared, and the
-//! filesystem readers deliberately are: "get three files off this Linux disk" is
-//! a desktop job that file-level restore also needs.
+//! Two programs sit on this: `bulkhead`, here, is the desktop build, driven by
+//! a person at a broken machine; `ballast`, in its own repo, is the server
+//! build, run unattended. The split is by *who runs it* -- anything wanting a
+//! service account, a credential store or a schedule belongs to ballast.
+//! Everything below is shared, and the filesystem readers deliberately are:
+//! "get three files off this Linux disk" is a desktop job that file-level
+//! restore also needs.
 mod bitmap;
 mod carve;
 mod cert;

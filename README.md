@@ -34,20 +34,26 @@ A proprietary image format is how you get locked in. A VHDX opens in Explorer,
 in Hyper-V, in `Mount-DiskImage`, and in every other tool on the platform — with
 or without bulkhead installed.
 
-## Two builds, one library
+## A library, and who runs what
 
-The crate is a library with two binaries on it, split by **who runs the thing**:
+This repo is a library with the desktop program on top of it. The split that
+matters is **who runs the thing**:
 
-- **`bulkhead`** — the desktop build. A person, a broken machine, one disk. GUI,
-  recovery media, undelete, carve, erase. No service, no scheduler, nothing that
-  wants a credential.
-- **`ballast`** — the server build. Unattended and scheduled, and eventually
-  agents, hypervisor connectors and a console.
+- **`bulkhead`**, here — the desktop build. A person, a broken machine, one
+  disk. GUI, recovery media, undelete, carve, erase. No service, no scheduler,
+  nothing that wants a credential.
+- **`ballast`**, in its own repo — the server build. Unattended and scheduled,
+  and eventually agents, hypervisor connectors and a console. It takes this
+  library as a dependency.
 
 Anything needing a service account, a credential store or an unattended run
-belongs to `ballast`. Everything a person drives interactively stays in
-`bulkhead`. The filesystem readers are deliberately in both: "get three files off
-this Linux disk" is a desktop job that file-level restore also needs.
+belongs to ballast. Everything a person drives interactively stays here. The
+filesystem readers are deliberately shared: "get three files off this Linux
+disk" is a desktop job that file-level restore also needs.
+
+The repos are separate because the boundary is easy to erode and hard to
+restore — a scheduler dependency that creeps into the desktop tool does not
+announce itself.
 
 ## Install
 
@@ -56,7 +62,6 @@ Needs Rust and an **elevated** prompt (raw volume access).
 ```
 cargo build --release
 target\release\bulkhead.exe
-target\release\ballast.exe
 ```
 
 ## Usage
@@ -80,18 +85,10 @@ bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
 bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
 bulkhead gui
 bulkhead media <OUT.iso>
-
-ballast backup <VOL> <DIR> [--full]
 ```
 
-`ballast backup` is the whole of a scheduled task's command line: it continues
-the chain already in `<DIR>`, taking a full when the directory is empty and an
-incremental off the newest image otherwise. Chain members are named
-`<label>-NNNN.vhdx` so the order lives in the filename rather than in a database.
-
-> No retention yet. A differencing child depends on its parent permanently, so
-> pruning is a **merge**, not a delete — get that wrong and every descendant is
-> silently orphaned until the restore that needed it. Chains grow until it lands.
+Scheduled, unattended backup is `ballast backup`, which lives in the ballast
+repo and builds on this library.
 
 ```powershell
 # full image of the system volume, taken live via VSS

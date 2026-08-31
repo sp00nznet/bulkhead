@@ -1,7 +1,7 @@
 //! bulkhead -- the desktop build: a person, a broken machine, one disk.
 //!
 //! No service, no scheduler, no credentials. Unattended and multi-machine work
-//! is `ballast`, which links the same library.
+//! is `ballast`, in its own repo, which takes this crate as a library.
 use bulkhead::*;
 
 const USAGE: &str = "\
