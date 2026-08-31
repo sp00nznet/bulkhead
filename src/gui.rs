@@ -300,8 +300,11 @@ fn run(log: HWND, args: Vec<String>, confirm: Option<String>) {
             enable_actions(title, true);
             append(log, msg);
         };
+        // The engine is always bulkhead.exe next to us. Naming it rather than
+        // reusing current_exe() is what lets bulkhead-gui.exe exist: it would
+        // otherwise spawn itself and open a second window per button.
         let exe = match std::env::current_exe() {
-            Ok(e) => e,
+            Ok(e) => e.with_file_name("bulkhead.exe"),
             Err(e) => return finish(&format!("[!] {e}\r\n")),
         };
         let child = Command::new(exe)
@@ -390,6 +393,16 @@ fn confirm_box(owner: HWND, text: &str) -> bool {
     unsafe {
         MessageBoxW(Some(owner), PCWSTR(t.as_ptr()), PCWSTR(c.as_ptr()),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES
+    }
+}
+
+/// The window failed before there was a window. bulkhead-gui.exe has no
+/// console to print to, so a box is the only way this is seen at all.
+pub fn fatal(msg: &str) {
+    let t = wide(msg);
+    let c = wide("bulkhead");
+    unsafe {
+        MessageBoxW(None, PCWSTR(t.as_ptr()), PCWSTR(c.as_ptr()), MB_OK | MB_ICONERROR);
     }
 }
 
