@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to attach binaries to a release
+
+jobs:
+  # A published advisory against anything in the tree is something to find out about from
+  # CI rather than from a user. Separate from the build so a new advisory reports itself
+  # without also failing the binaries.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Without this every run recompiles the whole dependency tree.
+      - uses: Swatinem/rust-cache@v2
+
+      # --locked fails if Cargo.lock would change, so CI builds exactly what was committed
+      # rather than silently picking up new dependency versions.
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+
+      # smoke.ps1 and fs-smoke.ps1 are deliberately not here: they want an elevated
+      # prompt, real disks to create and destroy, and WSL with mkfs. What CI can prove is
+      # that it compiles, that the parsers still agree with their unit tests, and that
+      # both binaries come out. The hardware claims are proven at a bench and written
+      # down in the README, not asserted by a green tick.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bulkhead-windows-x64
+          path: |
+            target/release/bulkhead.exe
+            target/release/bulkhead-gui.exe
+
+      # Only on a version tag: publish on the Releases page so people can download without
+      # building, or trusting a binary from anywhere else. Both executables, because the
+      # command line and the window are two different downloads for two different people.
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: |
+            target/release/bulkhead.exe
+            target/release/bulkhead-gui.exe
+          generate_release_notes: true
