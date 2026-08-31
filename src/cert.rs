@@ -387,7 +387,7 @@ mod tests {
         Cert {
             when: "2026-08-09T21:43:12Z".into(),
             host: "BENCH".into(),
-            operator: "BENCH\\nedch".into(),
+            operator: "BENCH\\operator".into(),
             tool: "bulkhead 0.1.0".into(),
             disk: 5,
             model: "Generic \"Reader\" <USB>".into(),
