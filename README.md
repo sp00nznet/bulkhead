@@ -46,26 +46,22 @@ A proprietary image format is how you get locked in. A VHDX opens in Explorer,
 in Hyper-V, in `Mount-DiskImage`, and in every other tool on the platform — with
 or without bulkhead installed.
 
-## A library, and who runs what
+## A library, and who runs it
 
 This repo is a library with the desktop program on top of it. The split that
-matters is **who runs the thing**:
+matters is **who runs the thing**: bulkhead is the desktop build, for a person
+at a broken machine with one disk in front of them. GUI, recovery media,
+undelete, carve, erase. No service, no scheduler, nothing that wants a
+credential.
 
-- **`bulkhead`**, here — the desktop build. A person, a broken machine, one
-  disk. GUI, recovery media, undelete, carve, erase. No service, no scheduler,
-  nothing that wants a credential.
-- **`ballast`**, in its own repo — the server build. Unattended and scheduled,
-  and eventually agents, hypervisor connectors and a console. It takes this
-  library as a dependency.
+Unattended and scheduled work — service accounts, credential stores, running
+across many machines — is deliberately not here. It belongs to a separate
+program built on this same library, and the separation is the point: a
+scheduler dependency that creeps into a desktop tool does not announce itself.
 
-Anything needing a service account, a credential store or an unattended run
-belongs to ballast. Everything a person drives interactively stays here. The
-filesystem readers are deliberately shared: "get three files off this Linux
-disk" is a desktop job that file-level restore also needs.
-
-The repos are separate because the boundary is easy to erode and hard to
-restore — a scheduler dependency that creeps into the desktop tool does not
-announce itself.
+The filesystem readers live in the library rather than in the program, because
+"get three files off this Linux disk" is a desktop job that file-level restore
+also needs.
 
 ## Install
 
@@ -108,9 +104,6 @@ bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
 bulkhead gui
 bulkhead media <OUT.iso>
 ```
-
-Scheduled, unattended backup is `ballast backup`, which lives in the ballast
-repo and builds on this library.
 
 ```powershell
 # full image of the system volume, taken live via VSS
