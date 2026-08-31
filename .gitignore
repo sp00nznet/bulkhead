@@ -1,1 +1,5 @@
 /target
+
+# Erase certificates name a real drive and its operator. `--cert` writes one on
+# every run, pass or fail, so keep them out of a repo that is going public.
+/docs/fikwot-purge.html

@@ -7,6 +7,8 @@ MiniTool ship nagware that lets you *make* a backup and then paywalls the
 restore. Paragon charges ~$40 per filesystem to read ext4 on Windows. Blancco
 charges per drive for an ATA command and a PDF.
 
+*Prices and product status as of August 2026.*
+
 None of this is hard science. Most of it is already implemented **inside
 Windows** — VSS, VHDX differencing disks, `AttachVirtualDisk`, ATA/NVMe
 sanitize commands. The paid tools are charging for the integration. bulkhead is
@@ -16,6 +18,11 @@ that integration, given away.
 > Nothing has been tried against a real *system* disk yet, and the recovery ISO
 > has been built but never booted. `restore` and `part move` write to disks and
 > are not undoable — read what they print before saying yes.
+
+![bulkhead reading an ext4 disk Windows cannot mount, then purging it](docs/demo.gif)
+
+_Rendered with [termshot](https://github.com/sp00nznet/termshot) from a real
+bench run; the drive's serial is a placeholder. Source: [`docs/demo.py`](docs/demo.py)._
 
 ## Why VHDX
 
@@ -61,8 +68,18 @@ Needs Rust and an **elevated** prompt (raw volume access).
 
 ```
 cargo build --release
-target\release\bulkhead.exe
 ```
+
+That produces two executables, and the Releases page carries the same two:
+
+| | |
+|---|---|
+| `bulkhead.exe` | the command line. Everything below. |
+| `bulkhead-gui.exe` | [the window](docs/gui.md), on its own. |
+
+They are the same engine: the window shells out to `bulkhead.exe` sitting
+next to it for every operation, so it can get the arguments wrong but never
+the disk. `bulkhead gui` opens the same window from the command line.
 
 ## Usage
 
@@ -175,7 +192,8 @@ stranded behind a partition table describing the old disk.
 - [x] `mount-fs` — ext4/XFS/HFS+ as a read-only Windows drive, via WinFsp
 - [x] `erase-info` — what erase commands a drive supports, and what blocks them
 - [x] `erase --method overwrite` — zero every sector, then sample-verify
-- [ ] `erase` via firmware sanitize — written, never run against a drive
+- [x] `erase` via firmware sanitize — ATA SANITIZE block erase, run end to
+      end on a SATA SSD; the certificate reads Purge
 - [x] erase certificate (`--cert`) — JSON for a machine, a printable page for
       a person, written whether it passed or failed
 - [ ] the certificate is unsigned: nothing ties the paper to the record
@@ -191,7 +209,8 @@ The five things people currently pay for. Each one builds on the last:
 1. **Imaging + recovery media** — **done.** The Reflect Free replacement.
    Outstanding: `verify`, scheduling/retention/chain merge.
 2. **Partition manager** — **done for GPT.** `part move` is the operation
-   nobody gives away; see below for what is deliberately left to Windows.
+   nobody gives away; see [Partitioning](docs/partitioning.md) for what is
+   deliberately left to Windows.
    MBR disks are now read rather than refused — `part list` and `identify`
    follow the extended chain and report logical partitions. Outstanding:
    nothing writes an MBR, so `part move` is still GPT-only.
@@ -207,462 +226,28 @@ The five things people currently pay for. Each one builds on the last:
 5. **Certified secure erase** — *in progress.* `erase-info` reports what a
    drive supports and what blocks it; `erase --method overwrite` wipes a drive
    and verifies by sampling, confirmed on real hardware; `--cert` produces the
-   record afterwards. The ATA SANITIZE path (crypto scramble, block erase) is
-   written but has never run against a drive. Outstanding: proving sanitize on
-   hardware, the NVMe equivalents, and signing the certificate.
+   record afterwards. The ATA SANITIZE block-erase path has now been run end to
+   end on a SATA SSD, and its certificate reads Purge. Outstanding: crypto
+   scramble on a drive that offers it, the NVMe equivalents, and signing the
+   certificate.
 
 Linux and macOS are a stretch goal. Windows first, because that's where the
 gap is.
 
-## Partitioning
 
-```
-> bulkhead part list disk6
-disk 6: 1.0 GB (512-byte sectors, GPT)
-  1       17.0 KB     16.0 MB  Microsoft reserved partition
-  2       16.0 MB    495.9 MB  Basic data partition
-         511.9 MB    512.0 MB  (free)
+## Documentation
 
-> bulkhead part move disk6 2 --to 116MB
-[*] moving 495.9 MB (backwards)
-  100%  495.9 MB / 495.9 MB
-[+] partition 2 now starts at 116.0 MB
-
-> bulkhead part list disk6
-disk 6: 1.0 GB (512-byte sectors, GPT)
-  1       17.0 KB     16.0 MB  Microsoft reserved partition
-          16.0 MB    100.0 MB  (free)
-  2      116.0 MB    495.9 MB  Basic data partition
-         611.9 MB    412.0 MB  (free)
-```
-
-"backwards" there is not cosmetic: that move slides the partition forward by
-less than its own length, so it overlaps itself and a front-to-back copy would
-read bytes it had already overwritten.
-
-Most of a partition manager is already free, so bulkhead only implements the
-part that is not:
-
-| Operation | Who does it |
-|---|---|
-| Shrink / extend a volume | Windows: `Resize-Partition`, Disk Management |
-| MBR→GPT on the *system* disk | Windows: `mbr2gpt.exe`, since 1703 |
-| **Move a partition** | **Nobody, at any price. This.** |
-
-Moving is also the missing half of the operation people actually hit: Windows
-will not extend a partition into free space that sits to its *left*. Slide the
-partition down with `part move`, then extend it with the native tools.
-
-A move is not journalled. If it is interrupted, the partition is gone — the
-table is only rewritten after the data has landed, so a crash leaves the old
-table pointing at data that is still where it says, but a crash *during* an
-overlapping move loses the overlap. Image the disk first.
-
-`part move` refuses the disk holding the running system; do that from the
-recovery media.
-
-## Recovering a lost partition table
-
-```powershell
-bulkhead scan disk2              # read-only: what is actually on there
-bulkhead scan disk2 --rebuild    # write a table pointing at it
-```
-
-A partition table is a few kilobytes of pointers. Losing it does not touch the
-filesystems — each one still opens with a header saying what it is and how big
-it is, so scanning for those headers reconstructs the table. Thirteen
-signatures, ported from [partrevive](https://github.com/sp00nznet/partrevive):
-NTFS, exFAT, FAT12/16/32, ext2/3/4, btrfs, XFS, F2FS, swap, plus LUKS and LVM
-which are reported but never sized (you cannot size a container from its
-header).
-
-Every detector re-reads the device to confirm the magic and returns the
-volume's **own** recorded size, so nothing is truncated by a guess. Candidates
-must start on a sector boundary, which kills almost every false positive from
-file contents.
-
-Two things a naive signature scan gets wrong, both handled:
-
-- **Backup superblocks.** ext, XFS, FAT and f2fs keep spare copies of their
-  superblock inside the filesystem, and a copy re-derives the same size — so it
-  looks like an identical partition starting partway into the real one. Same
-  type, same size, contained in an earlier candidate is always a copy.
-- **Ghosts.** A disk that was repartitioned still carries the old layout's boot
-  sectors, reporting plausible sizes for filesystems that have moved or gone.
-  Size cannot separate them — a moved volume and the boot sector it left behind
-  report exactly the same length. So NTFS candidates are corroborated twice:
-  the boot sector is followed to the `$MFT` (required), and to the backup boot
-  sector on the volume's last sector (raises confidence). A ghost's header
-  survives; the tail it points at now belongs to whatever occupies that ground.
-
-Where two candidates still claim the same ground, the best-corroborated wins,
-then the larger, and the other is reported as skipped.
-
-Rebuild writes the GPT itself, and only the table's own sectors. Neither
-`Clear-Disk` nor `New-Partition` is used: the first is documented as erasing all
-data on the disk, and the second zeroes the first sectors of a partition it
-creates so stale filesystem metadata is not picked up. Both are right for
-managing a disk and both destroy the thing a recovery tool exists to find. A truncated volume whose
-tail is gone is still found — it just loses a tie-break rather than being
-rejected outright. `--rebuild` saves the existing table to a file first,
-and only writes partition entries — filesystem contents are never touched.
-
-## Recovering deleted files
-
-```powershell
-bulkhead undelete D: --to C:
-ecovered
-bulkhead undelete disk2 --at 116MB --to C:
-ecovered   # volume that will not mount
-```
-
-Deleting a file on NTFS clears one flag in its MFT record and marks its
-clusters free. The record, the name, and the map of where the data lives all
-survive until something reuses them — which is why this works at all, and why
-it stops working the moment you keep using the volume.
-
-Read-only on the source. Small files live inside their MFT record and come back
-whole; larger ones are read back through their data runs. What comes off the
-platter is whatever is there **now**: those clusters were released on delete, so
-anything written since may be sitting in them. Check what you get.
-
-NTFS only. Compressed and encrypted files are not decoded, and a file whose
-record has been reused is gone for good. A file that cannot be fully read is
-reported as PARTIAL with the amount that was readable, never padded out to its
-recorded length — a correctly-sized file of zeros looks like a success and is
-the worst thing a recovery tool can hand back.
-
-## Carving: the last resort
-
-```powershell
-bulkhead carve disk2 --to C:\carved
-```
-
-When the MFT is gone there are no names, no sizes and no maps — only bytes.
-Most formats announce themselves with a magic number and many mark their own
-end, so a file can be lifted out whole without knowing anything about the
-filesystem that held it. Fourteen signatures: JPEG, PNG, GIF, PDF, zip (which
-covers Office and OpenDocument), MP4, SQLite, 7z, RAR, MP3, Ogg, gzip, bzip2.
-
-Two things it cannot do. Carved files have **no names** — only the offset they
-came from. And each is one contiguous stretch, so anything the filesystem
-**fragmented** comes back truncated at the first gap. Use `undelete` whenever
-the MFT survives; carve only when it does not.
-
-## The window
-
-```powershell
-bulkhead gui
-```
-
-![The bulkhead window](docs/gui-main.png)
-
-Native Win32 controls, no toolkit, no new dependencies — so it runs anywhere
-USER32 does, including WinPE, where the recovery media actually needs it. It is
-DPI-aware, which on a 4K panel is the difference between crisp text and a
-bitmap-stretched blur.
-
-The window never touches a disk. Every button runs bulkhead as a child process
-and pipes its output into the log, so the GUI can get the arguments wrong but
-never the engine.
-
-Progress redraws with a bare carriage return, which no text box can follow, so
-it drives the bar, the status line and the title bar — the last of those stays
-readable while the window is minimised. **Cancel** kills the running child; it
-says so plainly, because a killed child never runs its own cleanup and leaves
-the image attached and the VSS snapshot behind.
-
-### The destructive buttons
-
-`erase` and `restore` are on the second row, and the window does **not** decide
-they are safe. It has no `--yes` to give. What it does is pipe your answer to
-the engine's own prompt over stdin, so the check still happens where it always
-did:
-
-- **Restore** asks for `YES`, after a dialog naming the disk it will overwrite.
-- **Erase** asks for the drive's serial, which `cmd_erase` compares against the
-  drive it is about to destroy. Type it into the box on the left; **Erase info**
-  prints it. Get it wrong and nothing happens.
-
-`part move` and `scan --rebuild` are still command-line only.
-
-## Reading ext2/3/4, XFS and HFS+
-
-```powershell
-bulkhead ls disk2 --at 1MB              # what is on the Linux partition
-bulkhead ls disk2 --at 1MB /home/nedch
-bulkhead cp disk2 /home/nedch --to C:\out --at 1MB
-```
-
-These are the filesystems Paragon charges per seat to read. The filesystem is
-detected from the volume, so `ls` and `cp` take the same form either way.
-`--at` is the partition's byte offset, which `bulkhead part list` or
-`bulkhead scan` will tell you; a mounted volume letter needs no offset.
-
-ext4 is the straightforward one: a superblock gives the layout, group
-descriptors locate the inode tables, each inode carries a tree of extents. XFS
-is big-endian, packs an allocation-group index into the top of every block and
-inode number, and stores extents as bitfields straddling two 64-bit words —
-so most of its work is shifting fields apart before they mean anything. HFS+
-puts every directory entry on the volume in one B-tree keyed by parent folder
-and name, with each node's record offsets stored backwards at the end of it.
-
-**Read-only, deliberately and permanently.** Writing ext4 safely means
-implementing its journal, and a half-understood journal is how filesystems get
-destroyed. bulkhead reads these; Linux writes them.
-
-Not yet, and refused with a clear message rather than misread: ext2/ext3
-volumes predating extents (indirect block maps), XFS files large enough to need
-b-tree forks, HFS+ forks continuing into the extents overflow file, and old HFS
-volumes with HFS+ embedded inside them. APFS and btrfs are next.
-
-### Mounting them as a drive
-
-```powershell
-bulkhead mount-fs disk2 X: --at 1MB
-```
-
-Makes an ext4, XFS or HFS+ volume a read-only Windows drive, so Explorer and
-every other program can open it. Ctrl-C unmounts.
-
-A read-only filesystem still has to supply `Create` and `Overwrite`: WinFsp
-checks that all of Create, Open and Overwrite exist before dispatching *any*
-create, including opening an existing file for reading. Both answer
-`STATUS_MEDIA_WRITE_PROTECTED`.
-
-This needs **WinFsp** (`winget install WinFsp.WinFsp`), the only dependency
-here that does not ship with Windows. It is loaded at runtime rather than
-linked, so every other command works without it and building bulkhead needs no
-SDK. WinFsp is GPLv3 with an exception for free software, which bulkhead's MIT
-licence falls under; a proprietary fork would need a licence from its authors.
-
-### Verified against the real thing
-
-`fs-smoke.ps1` builds images with `mkfs` inside WSL, fills them with known
-content, records the hashes, then reads them back with bulkhead and compares.
-Unit tests only prove the parsing agrees with itself; this proves it agrees
-with the filesystem's own implementation, which is the only opinion that
-counts.
+The README is the entry point; each capability has its own page.
 
 | | |
 |---|---|
-| ext4 | **pass** — text, a 300 KB binary spanning extents, a nested file |
-| ext4 via a mounted drive | **pass** — the same three, read back through `X:` |
-| XFS | **pass** — same three |
-| XFS via a mounted drive | **pass** |
-| ext2 | **refused correctly** — no extents, so it declines rather than guessing |
-| F2FS, HFS+ | skipped: the WSL kernel cannot mount them, so no image can be filled |
-
-It found a real bug. XFS listed directories and reported correct file sizes but
-returned every file **empty** — the `NREXT64` feature, on by default in current
-`mkfs.xfs`, moves `di_nextents`, and reading the old offset gives zero. Extents
-are now bounded by the fork itself rather than by a count field that moves
-between versions. No unit test would have caught it: it was written against the
-same wrong assumption as the code.
-
-## What is this disk?
-
-```powershell
-bulkhead identify disk3
-```
-
-The question you actually have when someone hands you an unlabelled drive out
-of a dead NAS. Reading a filesystem is a lot of work; recognising one — and
-recognising the RAID or volume-manager layer *underneath* it — is very little,
-and on a NAS disk that layer is the thing standing between you and any
-filesystem at all.
-
-| Recognised | Reports |
-|---|---|
-| **Linux MD RAID** | array name and UUID, level, which member this disk is, chunk size, data offset, event count |
-| **LVM2 PV** | PV UUID, volume group name, device size |
-| **ZFS** | pool name and GUID, this device's GUID, state, txg, last host |
-| **btrfs** | label, filesystem UUID, device id, how many devices the set needs |
-| **bcachefs** | label, UUID, device N of M |
-| **SquashFS** | version, inode count, compression |
-| **UFS2** | block size, last mount point, volume name |
-| **VMFS** | version and label |
-| **NTFS / exFAT / FAT** | named only — Windows reads these itself |
-
-It probes the whole device and then every partition on it, because a NAS disk
-carries its RAID metadata on the partition rather than the disk.
-
-**Event counts and txg numbers are the point.** Members of the same array with
-different ones are out of sync, and assembling them in the wrong order is how a
-recoverable array becomes an unrecoverable one.
-
-**Two things can claim the same disk, and only one of them is current.** A
-drive that was a ZFS member and has since been reformatted still carries its
-vdev labels at the far end, where nothing has written. So `identify` reports
-*which* of ZFS's four labels survive: front labels gone and end labels intact
-means the pool membership is history, not news. It reports everything it finds
-and tells you what the evidence is — it does not pick a winner for you.
-
-These are identification only. ZFS, VMFS and SquashFS are not read by bulkhead
-— SquashFS contents are always compressed, and the other two are large projects
-in themselves. Assemble MD/LVM on Linux, import ZFS with `zpool`, and the
-filesystem on top is then readable here.
-
-## Secure erase
-
-```powershell
-bulkhead erase-info disk3
-```
-
-Blancco and KillDisk charge per drive for one command the drive already
-implements, plus a piece of paper. The command is the easy part. The parts
-worth building are knowing *which* command a given drive will accept, and
-producing a record afterwards that means something — so that comes first, and
-it is read-only.
-
-It reports the drive's identity and every erase path it offers: ATA security
-erase, ATA sanitize (crypto/block/overwrite), NVMe format, NVMe sanitize. More
-usefully it says what is **stopping** one:
-
-- **FROZEN** — nearly every desktop firmware freezes the ATA security state at
-  boot, and a security erase cannot start until the drive is power-cycled.
-  Suspend and resume, or hot-plug it. ATA *sanitize* is a separate feature set
-  and is not affected, which is why it is preferred where available.
-- **USB** — bridges rarely pass these commands through, and one that
-  half-implements them can report success without erasing anything.
-- **password already set** — an existing ATA password must be known first.
-- **the drive did not answer** — some storage drivers, Intel RST and VMD
-  especially, do not pass capability queries through at all. That is reported
-  as *unknown*, never as "this drive cannot be erased": a question that was
-  never asked is not a negative answer.
-
-Where a drive advertises sanitize, `erase-info` also asks it for its sanitize
-**status**. That command changes nothing, but it rides the same pass-through,
-the same task-file split and the same 48-bit flag as the sanitize that erases
-the drive — so an answer here means the destructive command will reach the
-drive as well. Better to find that out before typing a serial number than
-after.
-
-```powershell
-bulkhead erase disk5 --method overwrite
-```
-
-Writes zeros over every sector, then reads back 32 points spread across the
-drive — including the first and last, where partition tables live — and refuses
-to claim success unless they all come back blank. It samples the same points
-*before* the write too, so it can say whether anything was actually removed or
-the drive was already empty.
-
-It asks for the drive's **serial number**, not a yes. A serial cannot be typed
-by reflex, and finding it means looking at which drive this really is.
-
-Where the drive offers a real sanitize, that is used instead and the drive
-erases its own media:
-
-```powershell
-bulkhead erase disk1 --method ata-sanitize-crypto   # discards the key, seconds
-bulkhead erase disk1 --method ata-sanitize-block    # erases every block
-```
-
-**Overwrite is the weaker method and is labelled as such wherever it appears.**
-A firmware sanitize reaches blocks the drive has quietly remapped out of
-service over its life; an overwrite reaches only what the drive currently maps.
-On flash — SSDs, SD cards, USB sticks — wear levelling can leave old data in
-spare blocks that no write will ever land on. If a drive advertises a sanitize
-and you ask for an overwrite anyway, it says so before it starts.
-
-Verification matches the method rather than assuming one shape. An overwrite or
-a block erase has to read back blank. A crypto scramble does not and never
-will: it throws the key away, so the media still reads as dense ciphertext.
-Checking that for blankness would fail a successful erase, so what gets
-verified is that the old contents are gone — and the output says plainly that
-the key's destruction is the drive's claim, not a thing bulkhead observed.
-
-### The certificate
-
-```powershell
-bulkhead erase disk5 --method overwrite --cert wipe-058F63666433.html
-bulkhead erase disk5 --method overwrite --cert wipe-058F63666433.json
-```
-
-The other half of what Blancco sells. The extension picks the form: `.json` for
-whatever consumes it next, anything else for a page that prints — drive
-identity, the method, its NIST SP 800-88 class, elapsed time, and every sample
-point with the first sixteen bytes before and after.
-
-Three things it deliberately does:
-
-- **It is written whether the erase passed or failed.** A certificate that only
-  exists on success is a certificate that lies by omission, so a failed run
-  produces one that says FAILED and marks which points did not verify.
-- **It says Clear or Purge, and means it.** SP 800-88 draws that line exactly
-  at the remapped-block problem: a host overwrite reaches what the drive maps
-  (Clear), a firmware sanitize reaches the media (Purge). Claiming Purge for an
-  overwrite is the one lie a certificate must not tell.
-- **The limits are printed on the certificate itself**, not filed in a manual —
-  that sampling is not a full read-back, that an overwrite cannot reach retired
-  sectors, and that a crypto erase's key destruction is the drive's claim. It
-  is read months later by someone who never saw the terminal.
-
-It is self-attested and unsigned: nothing cryptographically ties the printed
-page to the JSON record, and the document says so on its face.
-
-The sanitize path is written against the ACS spec, and its **status** command
-now reaches real drives — but nothing has yet been *erased* with it.
-
-Getting even that far meant discovering that Windows' own `storahci` refuses
-ATA opcode 0xB4 on `IOCTL_ATA_PASS_THROUGH_DIRECT` outright, with
-ERROR_NOT_SUPPORTED, before the command reaches the drive. It is the opcode
-being filtered and not the request: `IDENTIFY` and `READ VERIFY SECTORS EXT` go
-through the very same call untouched, on the same drives. Wrapping the
-identical command in a SCSI ATA PASS-THROUGH(16) CDB and letting the driver's
-SAT layer unwrap it gets through, and the drive's own verdict comes back in the
-sense data — so that is what `sanitize.rs` does. `examples/atprobe.rs` is the
-experiment that established it, kept in the tree because it is the only thing
-that tells you *which layer* is refusing a command.
-
-The overwrite path has run: a 7.4 GB USB card reader was imaged, erased,
-checked with `identify` and `scan` (both found nothing -- no table, no
-filesystem signatures anywhere on the device), then restored from the image
-with its contents intact.
-
-That test is worth describing precisely, because it proves less than it looks
-like it does. It shows the mapped sectors were blank afterwards and held data
-before. It does not show the card retains no data at all -- an overwrite cannot
-reach blocks the controller has remapped, and nothing observable from the host
-can tell you whether any exist. For flash, only a firmware sanitize makes the
-stronger claim.
-
-## Design notes
-
-`ponytail:` comments in the source mark deliberate shortcuts and name their
-ceiling. Two worth knowing about:
-
-- **PowerShell** drives VSS and partition creation. It's the shortest path and
-  exists on every live Windows, but it's absent from a minimal WinPE and costs
-  ~400 ms a call. Goes away when we have direct `IVssBackupComponents` and our
-  own GPT writer (the partition manager needs a GPT writer regardless).
-- **Incrementals read-compare** rather than tracking changed blocks. Correct,
-  and it keeps the child VHDX small, but it reads the parent in full. A real CBT
-  filter driver is a lot of driver for something that's I/O-bound either way.
-
-Two granularity numbers, because both were bugs once:
-
-- **Comparison granularity is 64 KiB.** At the 4 MiB read-chunk size, one
-  changed byte of NTFS metadata dirtied all 4 MiB, and a volume with nothing
-  but background churn reported 492 MB of 496 MB changed.
-- **VHDX block size is 2 MiB, not the 32 MiB default.** VHDX materialises a
-  whole block on any write into it, and a differencing child inherits the size
-  from its parent. The default turned 18 MB of scattered changes into 256 MB.
-
-Neither is measured against a real workload yet; both are `ponytail:` marked.
-
-### Known limitation: incremental size
-
-An incremental is no smaller than `2 MiB x (number of distinct 2 MiB regions
-touched)`, because VHDX materialises a whole block on any write into it. NTFS
-churn -- `$LogFile`, `$MFT`, the volume bitmap -- is scattered rather than
-contiguous, so a small number of changed bytes still touches a lot of regions.
-Reading the allocation bitmap removes the free-space half of this; what remains
-is metadata churn inside the used region.
-
-A third granularity, alongside the two above: **free space is skipped in whole
-4 MiB chunks**, so a run of free clusters shorter than that is still copied.
+| [Partitioning](docs/partitioning.md) | `part list`, `part move`, and what is deliberately left to Windows |
+| [Data recovery](docs/recovery.md) | `scan` a lost partition table, `undelete` from NTFS, `carve` from raw bytes |
+| [Reading ext2/3/4, XFS and HFS+](docs/filesystems.md) | `ls`, `cp`, `mount-fs`, and how they are verified |
+| [What is this disk?](docs/identify.md) | `identify`: RAID, LVM, ZFS, btrfs and friends |
+| [Secure erase](docs/secure-erase.md) | `erase-info`, `erase`, and the certificate |
+| [The window](docs/gui.md) | `bulkhead gui` |
+| [Design notes](docs/design.md) | shortcuts taken, granularity numbers, known limits |
 
 ## License
 
