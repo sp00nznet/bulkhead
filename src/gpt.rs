@@ -154,13 +154,22 @@ impl Entry {
     pub fn sectors(&self) -> u64 { self.end_lba - self.start_lba + 1 }
 }
 
-/// Occupied entries only. An all-zero type GUID means the slot is free.
+/// Occupied entries only, **in disk order**. An all-zero type GUID means the
+/// slot is free.
+///
+/// Sorted because table order is not disk order and nothing good comes of
+/// assuming it is: an OEM layout that adds a partition after the fact leaves
+/// entry 8 sitting physically between 5 and 6, which is exactly what the
+/// Lenovo test drive does. Any caller walking the list to find the gaps then
+/// runs its cursor backwards and reports occupied space as free -- pointing a
+/// user at 58 GB of "free" space that is a live ext4. `number` stays the
+/// entry's own 1-based table index, so writes by number are unaffected.
 pub fn entries(header: &[u8], array: &[u8]) -> Vec<Entry> {
     let (sz, n) = (entry_size(header), entry_count(header));
     if sz < E_NAME {
         return Vec::new();
     }
-    (0..n)
+    let mut v: Vec<Entry> = (0..n)
         .filter_map(|i| {
             let e = array.get(i * sz..(i + 1) * sz)?;
             if e[E_TYPE..E_TYPE + 16].iter().all(|&b| b == 0) {
@@ -178,7 +187,9 @@ pub fn entries(header: &[u8], array: &[u8]) -> Vec<Entry> {
                 name: String::from_utf16_lossy(&utf16),
             })
         })
-        .collect()
+        .collect();
+    v.sort_by_key(|e| e.start_lba);
+    v
 }
 
 /// Point entry `number` (1-based) at a new extent, keeping its length.
@@ -352,6 +363,39 @@ mod tests {
     #[test]
     fn crc_matches_the_standard_vector() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn entries_come_back_in_disk_order_not_table_order() {
+        // The Lenovo test drive's real layout: a Windows 8 OEM disk whose ext4
+        // partition was added later, so table entry 8 sits physically between
+        // entries 5 and 6. Walking the table in index order runs the free-space
+        // cursor backwards and reports a live 58 GB filesystem as free.
+        let h = header(2048);
+        let sz = 128usize;
+        let mut array = vec![0u8; 128 * sz];
+        // (table index, start_lba) -- index 3 lives between 1 and 2 on disk.
+        for &(idx, start, end) in &[(1usize, 100u64, 199u64),
+                                    (2, 400, 499),
+                                    (3, 200, 399)] {
+            let e = &mut array[(idx - 1) * sz..idx * sz];
+            e[E_TYPE] = 0xAB; // any non-zero type GUID marks the slot used
+            put(e, E_START, start);
+            put(e, E_END, end);
+        }
+
+        let got = entries(&h, &array);
+        assert_eq!(got.iter().map(|e| e.start_lba).collect::<Vec<_>>(),
+                   [100, 200, 400], "must be sorted by position on the disk");
+        assert_eq!(got.iter().map(|e| e.number).collect::<Vec<_>>(),
+                   [1, 3, 2], "but each keeps its own table index");
+
+        // The bug this guards: walk the sorted list and there is no gap.
+        let mut pos = 100;
+        for e in &got {
+            assert!(e.start_lba >= pos, "cursor must never run backwards");
+            pos = e.end_lba + 1;
+        }
     }
 
     #[test]
