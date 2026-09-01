@@ -683,8 +683,25 @@ pub fn cmd_restore(image: &str, target: &str, yes: bool) -> Res<()> {
     let vhd = Vhd::open(image, false)?;
     vhd.attach(true, false, false)?;
     let r = restore_inner(&vhd, disk, yes);
+    // Detach before the disk is offered to Windows again. The restored disk
+    // carries the image's disk GUID, so while the image is still attached the
+    // two collide, and Windows resolves that by rewriting the target's
+    // partition table: fresh v1 GUIDs built from the NIC's MAC, and the
+    // entries compacted. A Debian restore came back with new PARTUUIDs and its
+    // partitions renumbered from 1/14/15 to 1/2/3, so `root=PARTUUID=...`
+    // pointed at nothing and the restored system dropped to an initramfs
+    // shell.
     let _ = vhd.detach();
-    r
+    r?;
+
+    // And leave it offline. Bringing it online invites the same rewrite from
+    // any other attached disk carrying that GUID -- the original, most
+    // obviously, which is exactly what a restore-and-verify has plugged in.
+    // A restored disk is for booting or for reading deliberately, so make
+    // that step the operator's.
+    eprintln!("[*] disk {disk} is offline, so nothing can rewrite its partition table.");
+    eprintln!("    Boot it, or bring it online with:  Set-Disk -Number {disk} -IsOffline $false");
+    Ok(())
 }
 
 /// Get Windows to let go of a disk so its sectors can be written raw.
@@ -790,7 +807,6 @@ fn restore_inner(vhd: &Vhd, disk: u32, yes: bool) -> Res<()> {
 
     drop(locks);
     drop(dst);
-    ps(&format!("Set-Disk -Number {disk} -IsOffline $false"))?;
     eprintln!("[+] disk {disk} restored");
     Ok(())
 }
