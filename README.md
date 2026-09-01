@@ -3,11 +3,16 @@
 Free, open block-level backup and recovery for Windows.
 
 Macrium killed Reflect Free. Acronis went subscription. EaseUS, AOMEI and
-MiniTool ship nagware that lets you *make* a backup and then paywalls the
-restore. Paragon charges ~$40 per filesystem to read ext4 on Windows. Blancco
-charges per drive for an ATA command and a PDF.
+MiniTool ship nagware that makes the backup for free and paywalls the restore.
+Paragon charges ~$40 per filesystem to read ext4 on Windows. Blancco charges
+per drive for one ATA command and a PDF.
 
 *Prices and product status as of August 2026.*
+
+None of this is hard science, and most of it already ships **inside Windows**:
+VSS, VHDX differencing disks, `AttachVirtualDisk`, the ATA and NVMe sanitize
+commands. What the paid tools sell is the integration. bulkhead is that
+integration, given away.
 
 Sister project to [futureburn](https://github.com/sp00nznet/futureburn),
 [pstfree](https://github.com/sp00nznet/pstfree) and
@@ -15,20 +20,32 @@ Sister project to [futureburn](https://github.com/sp00nznet/futureburn),
 Windows payware, read the published spec it is hiding behind, give it away.
 [Why](PHILOSOPHY.md).
 
-None of this is hard science. Most of it is already implemented **inside
-Windows** — VSS, VHDX differencing disks, `AttachVirtualDisk`, ATA/NVMe
-sanitize commands. The paid tools are charging for the integration. bulkhead is
-that integration, given away.
+> ⚠️ **Pre-alpha.** Every command has been run against real hardware or a
+> real filesystem, including a full image → restore → boot cycle from the
+> recovery media and an ATA SANITIZE purge with a certificate. What is still
+> untested: the system disk of a *physical* machine, and BitLocker volumes,
+> which image as ciphertext. `restore`, `erase` and `part move` write to disks
+> and cannot be undone — read what they print before saying yes.
 
-> ⚠️ Pre-alpha, but every command works and is verified on real hardware.
-> Nothing has been tried against a real *system* disk yet, and the recovery ISO
-> has been built but never booted. `restore` and `part move` write to disks and
-> are not undoable — read what they print before saying yes.
+Reading a Linux root filesystem that Windows will not mount — the thing
+Paragon charges ~$40 for — with sizes and counts taken from the filesystem
+itself, all the way down:
 
-![bulkhead reading an ext4 disk Windows cannot mount, then purging it](docs/demo.gif)
+```
+> bulkhead ls debian-root.img
+[*] debian-root.img at 0 B: ext2/3/4, 2.9 GB
+       38.6 MB  boot/  615 files
+        1.5 MB  etc/  932 files
+         732 B  root/  2 files
+      571.5 MB  usr/  20348 files
+        9.0 MB  var/  1659 files
+           7 B  bin
+           9 B  lib64
+[*] 20 entries here, 23560 files in all, 620.6 MB
+```
 
-_Rendered with [termshot](https://github.com/sp00nznet/termshot) from a real
-bench run; the drive's serial is a placeholder. Source: [`docs/demo.py`](docs/demo.py)._
+`find | wc -l` on the same filesystem, mounted on the machine it came from,
+says 23560. `cp` pulls any of it out; `mount-fs` gives it a drive letter.
 
 And the same engine with a window on it, for the machine that is already
 broken and the person who does not want a command line:
@@ -187,7 +204,7 @@ stranded behind a partition table describing the old disk.
 - [x] `undo` — put back a table saved by `scan --rebuild`
 - [x] `carve` — signature-based recovery when no filesystem survives
 - [ ] verify (hash the image against the source)
-- [ ] scheduling, retention, chain merge
+- [ ] chain merge — collapse a differencing chain back into one image
 - [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
 - [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE;
       progress bar, cancel, and `erase`/`restore` behind the engine's own prompts
@@ -203,15 +220,19 @@ stranded behind a partition table describing the old disk.
 - [ ] the certificate is unsigned: nothing ties the paper to the record
 - [ ] MBR disks are read by `part list` and `identify`, but `part move`
       still writes GPT only
-- [ ] tested against a real system disk; BitLocker images as ciphertext
-- [ ] the ISO has been built but never booted
+- [x] the recovery ISO boots, and the whole cycle runs from it — `identify`,
+      `image`, `restore` and the GUI, verified in a booted WinPE VM
+- [ ] tested against the system disk of a *physical* machine. A VM's system
+      disk has been imaged, restored onto a bigger disk and booted back up
+- [ ] BitLocker volumes image as ciphertext, not plaintext
 
 ## Roadmap
 
 The five things people currently pay for. Each one builds on the last:
 
 1. **Imaging + recovery media** — **done.** The Reflect Free replacement.
-   Outstanding: `verify`, scheduling/retention/chain merge.
+   Outstanding: `verify` and chain merge. Scheduling and retention are not
+   on this list on purpose — see **A library, and who runs it** above.
 2. **Partition manager** — **done for GPT.** `part move` is the operation
    nobody gives away; see [Partitioning](docs/partitioning.md) for what is
    deliberately left to Windows.
