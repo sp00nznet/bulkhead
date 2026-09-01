@@ -7,8 +7,6 @@ MiniTool ship nagware that makes the backup for free and paywalls the restore.
 Paragon charges ~$40 per filesystem to read ext4 on Windows. Blancco charges
 per drive for one ATA command and a PDF.
 
-*Prices and product status as of August 2026.*
-
 None of this is hard science, and most of it already ships **inside Windows**:
 VSS, VHDX differencing disks, `AttachVirtualDisk`, the ATA and NVMe sanitize
 commands. What the paid tools sell is the integration. bulkhead is that
@@ -19,13 +17,6 @@ Sister project to [futureburn](https://github.com/sp00nznet/futureburn),
 [vncfree](https://github.com/sp00nznet/vncfree) — same attitude: find the
 Windows payware, read the published spec it is hiding behind, give it away.
 [Why](PHILOSOPHY.md).
-
-> ⚠️ **Pre-alpha.** Every command has been run against real hardware or a
-> real filesystem, including a full image → restore → boot cycle from the
-> recovery media and an ATA SANITIZE purge with a certificate. What is still
-> untested: the system disk of a *physical* machine, and BitLocker volumes,
-> which image as ciphertext. `restore`, `erase` and `part move` write to disks
-> and cannot be undone — read what they print before saying yes.
 
 Reading a Linux root filesystem that Windows will not mount — the thing
 Paragon charges ~$40 for — with sizes and counts taken from the filesystem
@@ -51,6 +42,13 @@ And the same engine with a window on it, for the machine that is already
 broken and the person who does not want a command line:
 
 ![The bulkhead window](docs/gui-main.png)
+
+> ⚠️ **Pre-alpha.** Every command has been run against real hardware or a
+> real filesystem, including a full image → restore → boot cycle from the
+> recovery media and an ATA SANITIZE purge with a certificate. What is still
+> untested: the system disk of a *physical* machine, and BitLocker volumes,
+> which image as ciphertext. `restore`, `erase` and `part move` write to disks
+> and cannot be undone — read what they print before saying yes.
 
 ## Why VHDX
 
