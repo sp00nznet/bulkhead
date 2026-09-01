@@ -1,0 +1,14 @@
+# WinPE has neither VCRUNTIME140.dll nor comctl32.dll. Without these two flags
+# the recovery media's bulkhead.exe dies in the loader with 0xC0000135
+# (STATUS_DLL_NOT_FOUND) before main runs, so it prints nothing at all and the
+# prompt just comes back -- which is exactly what it did.
+#
+#   crt-static  drops VCRUNTIME140.dll and the api-ms-win-crt-* imports.
+#   DELAYLOAD   keeps comctl32.dll out of the load-time import table, so only
+#               `bulkhead gui` touches it and every CLI command runs in WinPE.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DELAYLOAD:comctl32.dll",
+    "-C", "link-arg=delayimp.lib",
+]

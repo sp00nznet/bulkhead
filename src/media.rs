@@ -93,6 +93,38 @@ fn adk_roots() -> Res<Vec<PathBuf>> {
     Ok(v)
 }
 
+/// The `bulkhead.exe` to install into the media.
+///
+/// Normally this is the running binary, but `media` can be invoked from
+/// `bulkhead-gui.exe`, which is useless on the recovery prompt. In that case
+/// take its sibling `bulkhead.exe`, which `cargo build` puts right next to it.
+fn cli_exe() -> Res<std::path::PathBuf> {
+    let me = std::env::current_exe()?;
+    let is_gui = me
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("bulkhead-gui"));
+    if !is_gui {
+        return Ok(me);
+    }
+    let cli = me.with_file_name("bulkhead.exe");
+    if cli.is_file() {
+        eprintln!(
+            "[*] building from the GUI binary; installing {} instead",
+            cli.display()
+        );
+        return Ok(cli);
+    }
+    Err(format!(
+        "run `media` from bulkhead.exe, not bulkhead-gui.exe.
+             The GUI binary has no console, so on the recovery prompt every
+             command would exit without printing anything. Expected to find
+             {} beside it.",
+        cli.display()
+    )
+    .into())
+}
+
 pub fn build(out_iso: &str) -> Res<()> {
     // Checked up front because the first thing that needs it is a DISM
     // preflight whose failure is neither fatal nor obviously about privilege.
@@ -138,7 +170,13 @@ pub fn build(out_iso: &str) -> Res<()> {
         .into());
     }
 
-    let exe = std::env::current_exe()?;
+    // The media must carry the CLI binary. bulkhead-gui is built
+    // `windows_subsystem = "windows"`, so a copy of it in System32 runs,
+    // detaches from the console and exits without printing a byte -- the
+    // recovery prompt then looks fine and every command silently does
+    // nothing. Building the ISO from the GUI binary used to produce exactly
+    // that, because this was `current_exe()` and nothing checked.
+    let exe = cli_exe()?;
     let work = std::env::temp_dir().join("bulkhead-winpe");
     let mount = work.join("mount");
     let wim = work.join("media").join("sources").join("boot.wim");
