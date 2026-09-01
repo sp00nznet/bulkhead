@@ -93,8 +93,16 @@ umount /tmp/bhmnt
     $out = Join-Path $work "$name-out"
     Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
 
-    & $exe ls $local 2>&1 | Write-Host
+    $lsOut = & $exe ls $local 2>&1 | Out-String
+    Write-Host $lsOut
     if ($LASTEXITCODE -ne 0) { throw "${name}: ls failed" }
+
+    # docs/ holds blob.bin and nested/deep.txt. A listing that shows it as a
+    # bare name is how a volume with a VM image on it got read as empty, so
+    # the depth has to show or this is not a listing worth erasing on.
+    if ($lsOut -notmatch 'docs/\s+2 files') {
+        throw "${name}: ls did not report docs/ as holding 2 files -- nested content is invisible again"
+    }
 
     & $exe cp $local / --to $out 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "${name}: cp failed" }

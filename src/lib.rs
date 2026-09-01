@@ -1799,6 +1799,39 @@ pub fn cmd_mount_fs(target: &str, at: Option<u64>, mount_point: &str, debug: boo
 }
 
 /// List a directory on a filesystem Windows cannot read.
+/// Files and bytes under a directory, all the way down.
+///
+/// `ls` showed a directory as a bare name, so a directory holding a 40 GB VM
+/// image looked exactly like an empty one -- and a volume got erased on the
+/// strength of that listing. The walk is the same one `cmd_cp` does, so what
+/// `ls` reports and what `cp` would carry off cannot drift apart.
+///
+/// Iterative and inode-guarded: a directory loop on a damaged volume would
+/// otherwise hang, and unlike `cp` there is no growing output to notice it by.
+fn tally(fs: &Fs, ino: u64) -> (u64, u64) {
+    let (mut files, mut bytes) = (0u64, 0u64);
+    let mut seen = std::collections::HashSet::from([ino]);
+    let mut queue = vec![ino];
+    // ponytail: walks the whole tree on every ls. Fine for the volumes this
+    // reads; add a depth cap if someone points it at millions of inodes.
+    while let Some(dir) = queue.pop() {
+        let Ok(entries) = fs.read_dir(dir) else {
+            continue;
+        };
+        for e in entries {
+            if e.is_dir {
+                if seen.insert(e.inode) {
+                    queue.push(e.inode);
+                }
+            } else {
+                files += 1;
+                bytes += fs.size_of(e.inode).unwrap_or(0);
+            }
+        }
+    }
+    (files, bytes)
+}
+
 pub fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
     let (disk, base, name) = open_target(target, at)?;
     let fs = Fs::open(&disk, base)?;
@@ -1811,15 +1844,32 @@ pub fn cmd_ls(target: &str, at: Option<u64>, path: &str) -> Res<()> {
     }
     let mut entries = fs.read_dir(ino)?;
     entries.sort_by_key(|a| (!a.is_dir, a.name.to_lowercase()));
+    let (mut deep_files, mut deep_bytes) = (0u64, 0u64);
     for e in &entries {
         if e.is_dir {
-            eprintln!("  {:>12}  {}/", "", e.name);
+            let (files, bytes) = tally(&fs, e.inode);
+            deep_files += files;
+            deep_bytes += bytes;
+            let note = match files {
+                0 => "empty".into(),
+                1 => "1 file".into(),
+                n => format!("{n} files"),
+            };
+            eprintln!("  {:>12}  {}/  {note}", human(bytes), e.name);
         } else {
             let size = fs.size_of(e.inode).unwrap_or(0);
+            deep_files += 1;
+            deep_bytes += size;
             eprintln!("  {:>12}  {}", human(size), e.name);
         }
     }
-    eprintln!("[*] {} entries", entries.len());
+    // Never just "N entries": that reads as a total, and here it was believed
+    // as one.
+    eprintln!(
+        "[*] {} entries here, {deep_files} files in all, {}",
+        entries.len(),
+        human(deep_bytes)
+    );
     Ok(())
 }
 
