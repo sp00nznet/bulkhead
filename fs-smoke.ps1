@@ -124,6 +124,13 @@ umount /tmp/bhmnt
     & $exe cp $local / --to $out 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "${name}: cp failed" }
 
+    # carve used to resolve its target by itself and only knew disks and
+    # volumes, so it refused an image file that every other reader accepts.
+    # These fixtures hold no carvable signatures, so finding nothing is the
+    # right answer -- opening the file at all is what is being checked.
+    & $exe carve $local --to "$out-carve" --limit 2 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "${name}: carve would not open an image file" }
+
     # Compare every file bulkhead produced against what the filesystem's own
     # tools said it contained.
     $bad = 0

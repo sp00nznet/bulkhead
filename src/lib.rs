@@ -1132,18 +1132,12 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
 
 /// Carve files out of raw bytes, for when no filesystem survives.
 pub fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
-    let path = match disk_arg(target) {
-        Some(n) => format!(r"\\.\PhysicalDrive{n}"),
-        None => {
-            format!(
-                r"\\.\{}",
-                target.trim_end_matches('\\').trim_end_matches(':')
-            ) + ":"
-        }
-    };
-    let disk = Raw::open(&path, false).ctx("open source")?;
+    // The same opener as ls, cp and undelete. carve had its own copy that
+    // only knew disks and volumes, so an image file -- the way every other
+    // reader gets tested without the media -- failed with a bare 0x8007007B.
+    let (disk, _, name) = open_target(target, None)?;
     let size = disk.len()?;
-    eprintln!("[*] carving {path} ({})", human(size));
+    eprintln!("[*] carving {name} ({})", human(size));
     let n = carve::carve(&disk, size, std::path::Path::new(out_dir), limit)?;
     eprintln!("[+] {n} file(s) written to {out_dir}");
     if n > 0 {
