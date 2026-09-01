@@ -9,6 +9,12 @@ charges per drive for an ATA command and a PDF.
 
 *Prices and product status as of August 2026.*
 
+Sister project to [futureburn](https://github.com/sp00nznet/futureburn),
+[pstfree](https://github.com/sp00nznet/pstfree) and
+[vncfree](https://github.com/sp00nznet/vncfree) — same attitude: find the
+Windows payware, read the published spec it is hiding behind, give it away.
+[Why](PHILOSOPHY.md).
+
 None of this is hard science. Most of it is already implemented **inside
 Windows** — VSS, VHDX differencing disks, `AttachVirtualDisk`, ATA/NVMe
 sanitize commands. The paid tools are charging for the integration. bulkhead is
@@ -246,6 +252,18 @@ The README is the entry point; each capability has its own page.
 | [Secure erase](docs/secure-erase.md) | `erase-info`, `erase`, and the certificate |
 | [The window](docs/gui.md) | `bulkhead gui` |
 | [Design notes](docs/design.md) | shortcuts taken, granularity numbers, known limits |
+
+## The sister projects
+
+| | |
+|---|---|
+| [futureburn](https://github.com/sp00nznet/futureburn) | CD, DVD and Blu-ray burning, ripping and image mounting. |
+| [pstfree](https://github.com/sp00nznet/pstfree) | Read, export and repair Outlook PST/OST files without Outlook. |
+| [vncfree](https://github.com/sp00nznet/vncfree) | A VNC client and server with no subscription and no ad-gated download. |
+
+Same method every time: read the published spec, call the OS API that is
+already there, ship one executable, MIT. Why that is worth doing at all is
+written down in **[PHILOSOPHY.md](PHILOSOPHY.md)**.
 
 ## License
 
