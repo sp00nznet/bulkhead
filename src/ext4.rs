@@ -122,6 +122,44 @@ pub fn dir_entries(block: &[u8]) -> Vec<DirEntry> {
     v
 }
 
+/// The size ext4 actually means, from a raw inode.
+///
+/// The 32 bits at 0x6C are `i_size_high` **only for a regular file**. For a
+/// directory, symlink or device the same field is `i_dir_acl`, and folding it
+/// into the size invents terabytes -- a Debian `/usr` listed as 11256861.9 TB
+/// is how this was found. Linux gates it on `S_ISREG` in `ext4_isize()` and so
+/// do we.
+///
+/// ponytail: ignores the `largedir` feature, which also allows a high size on
+/// directories. Nothing here uses a directory's byte size.
+fn isize_of(ino: &[u8]) -> u64 {
+    let lo = u32at(ino, 0x04);
+    if u16at(ino, 0x00) & 0xF000 == 0x8000 {
+        lo | (u32at(ino, 0x6C) << 32)
+    } else {
+        lo
+    }
+}
+
+/// Bytes per group descriptor, from the superblock.
+///
+/// `s_feature_incompat` is at **0x60**. This read 0x64 -- `s_feature_ro_compat`
+/// -- and tested 0x80 in it, which is HAS_SNAPSHOT and effectively never set,
+/// so a 64-bit volume was always treated as having 32-byte descriptors. Group 0
+/// still resolved (its offset is `group * desc_size` = 0 either way) and every
+/// other group read a descriptor from the middle of group 0's, so every inode
+/// outside the first group came back as garbage: a 5 KB file in a Debian /etc
+/// reported itself as 512 MB.
+fn desc_size_of(sb: &[u8]) -> u64 {
+    if u32at(sb, 0x60) & INCOMPAT_64BIT == 0 {
+        return 32;
+    }
+    match u16at(sb, 0xFE) as u64 {
+        n if n >= 32 => n,
+        _ => 32,
+    }
+}
+
 pub struct Ext<'a> {
     disk: &'a Raw,
     base: u64,
@@ -148,12 +186,7 @@ impl<'a> Ext<'a> {
             return Err("implausible block size".into());
         }
         let block_size = 1024u64 << log_bs;
-        let incompat = u32at(&sb, 0x64);
-        let desc_size = if incompat & INCOMPAT_64BIT != 0 {
-            u16at(&sb, 0xFE) as u64
-        } else {
-            32
-        };
+        let desc_size = desc_size_of(&sb);
         let inode_size = u16at(&sb, 0x58) as u64;
         let e = Ext {
             disk,
@@ -163,7 +196,7 @@ impl<'a> Ext<'a> {
             inodes_per_group: u32at(&sb, 0x28),
             blocks_per_group: u32at(&sb, 0x20),
             first_data_block: u32at(&sb, 0x14),
-            desc_size: if desc_size < 32 { 32 } else { desc_size },
+            desc_size,
             label: {
                 let raw = &sb[0x78..0x88];
                 let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
@@ -234,7 +267,7 @@ impl<'a> Ext<'a> {
 
     pub fn size_of(&self, num: u64) -> Res<u64> {
         let ino = self.inode(num)?;
-        Ok(u32at(&ino, 0x04) | (u32at(&ino, 0x6C) << 32))
+        Ok(isize_of(&ino))
     }
 
     /// Every block of a file, in logical order.
@@ -282,7 +315,7 @@ impl<'a> Ext<'a> {
 
     pub fn read_file(&self, num: u64) -> Res<Vec<u8>> {
         let ino = self.inode(num)?;
-        let size = u32at(&ino, 0x04) | (u32at(&ino, 0x6C) << 32);
+        let size = isize_of(&ino);
         let mut out = Vec::new();
         for b in self.blocks_of(&ino)? {
             if out.len() as u64 >= size {
@@ -393,6 +426,58 @@ mod tests {
         d[7] = ftype;
         d[8..8 + name.len()].copy_from_slice(name.as_bytes());
         d
+    }
+
+    /// 0x6C is i_size_high for a regular file and i_dir_acl for everything
+    /// else. Reading it unconditionally reported a Debian /usr as 11 million TB.
+    #[test]
+    fn size_high_only_counts_for_regular_files() {
+        let mut ino = vec![0u8; 128];
+        let set = |ino: &mut Vec<u8>, mode: u16, lo: u32, hi: u32| {
+            ino[0x00..0x02].copy_from_slice(&mode.to_le_bytes());
+            ino[0x04..0x08].copy_from_slice(&lo.to_le_bytes());
+            ino[0x6C..0x70].copy_from_slice(&hi.to_le_bytes());
+        };
+
+        // regular file, S_IFREG: the high half is real size
+        set(&mut ino, 0o100644, 512, 1);
+        assert_eq!(isize_of(&ino), (1 << 32) | 512);
+
+        // directory, S_IFDIR: identical bytes, but 0x6C is i_dir_acl
+        set(&mut ino, 0o040755, 4096, 0x8000);
+        assert_eq!(isize_of(&ino), 4096);
+
+        // symlink, S_IFLNK: same
+        set(&mut ino, 0o120777, 7, 0xdead);
+        assert_eq!(isize_of(&ino), 7);
+    }
+
+    /// The offset of s_feature_incompat. Reading 0x64 instead of 0x60 made
+    /// every 64-bit volume look 32-bit, which silently corrupted every inode
+    /// outside block group 0.
+    #[test]
+    fn descriptor_size_reads_the_incompat_field() {
+        let mut sb = vec![0u8; 1024];
+        let put32 =
+            |sb: &mut Vec<u8>, o: usize, v: u32| sb[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let put16 =
+            |sb: &mut Vec<u8>, o: usize, v: u16| sb[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        put16(&mut sb, 0xFE, 64);
+
+        // nothing set anywhere: not 64-bit, 32-byte descriptors
+        assert_eq!(desc_size_of(&sb), 32);
+
+        // 0x80 in ro_compat (0x64) is HAS_SNAPSHOT and must NOT be read as 64BIT
+        put32(&mut sb, 0x64, 0x80);
+        assert_eq!(desc_size_of(&sb), 32);
+
+        // 0x80 in incompat (0x60) is 64BIT: honour s_desc_size
+        put32(&mut sb, 0x60, 0x80);
+        assert_eq!(desc_size_of(&sb), 64);
+
+        // a nonsense s_desc_size still cannot go below the 32-byte minimum
+        put16(&mut sb, 0xFE, 8);
+        assert_eq!(desc_size_of(&sb), 32);
     }
 
     #[test]

@@ -79,14 +79,19 @@ mkdir -p /tmp/bhmnt/docs/nested
 seq 1 500 | sed 's/^/line /' > /tmp/bhmnt/hello.txt
 head -c 300000 /dev/urandom > /tmp/bhmnt/docs/blob.bin
 echo 'deep file' > /tmp/bhmnt/docs/nested/deep.txt
+seq 1 64 | while read i; do mkdir -p /tmp/bhmnt/spread/d`$i; echo `$i > /tmp/bhmnt/spread/d`$i/f.txt; done
 sync
+find /tmp/bhmnt -type f | wc -l | sed 's/^ *//; s/^/FILECOUNT /'
 md5sum /tmp/bhmnt/hello.txt /tmp/bhmnt/docs/blob.bin /tmp/bhmnt/docs/nested/deep.txt
 umount /tmp/bhmnt
 "@
     $want = @{}
+    $wantFiles = 0
     foreach ($l in $hashes) {
         if ($l -match '^([0-9a-f]{32})\s+/tmp/bhmnt/(.+)$') { $want[$Matches[2]] = $Matches[1] }
+        if ($l -match '^FILECOUNT\s+(\d+)$') { $wantFiles = [int]$Matches[1] }
     }
+    if ($wantFiles -eq 0) { throw "did not get a file count from the fixture" }
     if ($want.Count -ne 3) { throw "expected 3 hashes from mkfs, got $($want.Count)" }
 
     $local = Join-Path $work "$name.img"
@@ -103,6 +108,18 @@ umount /tmp/bhmnt
     if ($lsOut -notmatch 'docs/\s+2 files') {
         throw "${name}: ls did not report docs/ as holding 2 files -- nested content is invisible again"
     }
+
+    # The 64 spread/ directories exist to push inodes past block group 0. A
+    # descriptor-size bug made every inode outside group 0 read as garbage,
+    # and a total that matches the filesystem's own count is what catches it.
+    if ($lsOut -notmatch '(\d+) files in all') {
+        throw "${name}: ls printed no total file count"
+    }
+    $gotFiles = [int]$Matches[1]
+    if ($gotFiles -ne $wantFiles) {
+        throw "${name}: ls counted $gotFiles files, the filesystem has $wantFiles"
+    }
+    Write-Host "  ok $gotFiles files, matches the filesystem" -ForegroundColor Green
 
     & $exe cp $local / --to $out 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "${name}: cp failed" }
@@ -169,7 +186,7 @@ umount /tmp/bhmnt
     }
 }
 
-Test-Filesystem 'ext4' 'mkfs.ext4'     '-q -L BULKTEST -F' 64  'ext4'
+Test-Filesystem 'ext4' 'mkfs.ext4'     '-q -L BULKTEST -F' 320 'ext4'
 Test-Filesystem 'xfs'  'mkfs.xfs'      '-q -L BULKTEST -f' 300 'xfs'
 Test-Filesystem 'f2fs' 'mkfs.f2fs'     '-q -l BULKTEST'    100 'f2fs'
 Test-Filesystem 'hfs'  'mkfs.hfsplus'  '-v BULKTEST'       64  'hfsplus'
