@@ -31,6 +31,8 @@ echo.
 echo     bulkhead image D: E:\\backup.vhdx --no-snapshot
 echo     bulkhead mount E:\\backup.vhdx
 echo.
+echo   Or drive it from a window instead:  bulkhead gui
+echo.
 ";
 
 /// Run a batch snippet.
@@ -91,6 +93,33 @@ fn adk_roots() -> Res<Vec<PathBuf>> {
     }
     v.dedup();
     Ok(v)
+}
+
+/// Put `comctl32.dll` in the image, because WinPE has no common controls.
+///
+/// The GUI calls `InitCommonControlsEx` for the progress bar, and without this
+/// the window cannot come up at all -- the binary delay-loads comctl32 (see
+/// `.cargo/config.toml`), so the CLI is fine either way and only `bulkhead gui`
+/// needs the file. bulkhead has no application manifest, so it binds to the
+/// plain v5 comctl32 in System32 rather than a WinSxS v6 assembly, and a
+/// straight copy of the host's is the whole job.
+///
+/// Missing is a warning, not an error: the media is still worth building for
+/// the command line.
+fn install_comctl32(sys32: &std::path::Path) -> Res<()> {
+    let src = std::path::Path::new(&std::env::var("SystemRoot").unwrap_or(r"C:\Windows".into()))
+        .join("System32")
+        .join("comctl32.dll");
+    if !src.is_file() {
+        eprintln!(
+            "[!] {} not found -- `bulkhead gui` will not run on this media",
+            src.display()
+        );
+        return Ok(());
+    }
+    eprintln!("[*] installing comctl32.dll (WinPE has none, and the GUI needs it)");
+    std::fs::copy(&src, sys32.join("comctl32.dll"))?;
+    Ok(())
 }
 
 /// The `bulkhead.exe` to install into the media.
@@ -186,13 +215,18 @@ pub fn build(out_iso: &str) -> Res<()> {
     let _ = Command::new("dism").args(["/Cleanup-Wim"]).status();
     if work.exists() {
         eprintln!("[*] clearing {}", work.display());
+        // Speculative: only a previous run that died mid-DISM leaves an image
+        // mounted here. With nothing mounted DISM answers "Error: 50, The
+        // request is not supported" and prints a banner that reads like a
+        // failure, so take .output() and swallow it -- the result was always
+        // ignored, it just was not quiet about it.
         let _ = Command::new("dism")
             .args([
                 "/Unmount-Image",
                 &format!("/MountDir:{}", mount.display()),
                 "/Discard",
             ])
-            .status();
+            .output();
         std::fs::remove_dir_all(&work)?;
     }
 
@@ -270,6 +304,7 @@ fn populate(exe: &Path, mount: &Path, ocs: &Path) -> Res<()> {
     let sys32 = mount.join("Windows").join("System32");
     eprintln!("[*] installing bulkhead.exe");
     std::fs::copy(exe, sys32.join("bulkhead.exe"))?;
+    install_comctl32(&sys32)?;
     std::fs::write(sys32.join("startnet.cmd"), STARTNET.replace('\n', "\r\n"))?;
     Ok(())
 }
