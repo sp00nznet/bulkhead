@@ -34,8 +34,10 @@ bulkhead -- block-level backup and recovery for Windows
   bulkhead undo <diskN> <TABLE.bin> [--yes]
       Put back a partition table saved by scan --rebuild.
 
-  bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>] [--limit <N>]
+  bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>] [--limit <N>] [--flat]
       Recover deleted files from an NTFS volume. Read-only on the source.
+      Rebuilds the original directory tree from each record's parent
+      reference; --flat puts everything in one directory instead.
       --at gives the volume's byte offset when the target is a whole disk.
 
   bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
@@ -141,6 +143,7 @@ fn main() {
                 opt("--limit")
                     .and_then(|l| l.parse().ok())
                     .unwrap_or(10_000),
+                flag("--flat"),
             ),
             None => Err("undelete needs --to <DIR>".into()),
         },

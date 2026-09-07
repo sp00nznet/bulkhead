@@ -1055,7 +1055,28 @@ pub fn cmd_undo(disk_no: u32, file: &str, yes: bool) -> Res<()> {
 }
 
 /// Recover deleted files from an NTFS volume.
-pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) -> Res<()> {
+/// One path component, with anything that could climb out of the output
+/// directory removed. Names come from freed records and are not to be trusted.
+fn safe_component(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 0x20 { '_' } else { c })
+        .collect();
+    let s = s.trim().trim_end_matches('.').to_string();
+    if s.is_empty() || s == "." || s == ".." {
+        "_".to_string()
+    } else {
+        s
+    }
+}
+
+pub fn cmd_undelete(
+    target: &str,
+    at: Option<u64>,
+    out_dir: &str,
+    limit: usize,
+    flat: bool,
+) -> Res<()> {
     let (path, base) = match disk_arg(target) {
         Some(n) => (format!(r"\\.\PhysicalDrive{n}"), at.unwrap_or(0)),
         None => {
@@ -1093,17 +1114,70 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
     }
 
     std::fs::create_dir_all(out_dir)?;
+
+    // The directory map costs a second pass over the MFT, so only build it if
+    // the paths are going to be used.
+    let dirs = if flat {
+        std::collections::HashMap::new()
+    } else {
+        let d = fs.dirs(|n, total| {
+            eprint!("\r  {:3}%  mapping directories", n * 100 / total.max(1));
+            let _ = std::io::stderr().flush();
+        });
+        eprintln!("\r  {} director(ies) mapped                    ", d.len());
+        d
+    };
+
     let mut ok = 0u64;
     let mut bytes = 0u64;
+    let mut orphans = 0u64;
     for (i, d) in found.iter().enumerate() {
-        // Names come from a deleted record and are not to be trusted with a
-        // path: strip anything that could climb out of the output directory.
-        let safe: String = d
-            .name
-            .chars()
-            .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
-            .collect();
-        let dest = std::path::Path::new(out_dir).join(format!("{:04}_{}", i, safe));
+        let safe = safe_component(&d.name);
+
+        // Walk parent references up to the root. A chain can be broken (the
+        // parent record reused) or cyclic (a stale reference now pointing at a
+        // descendant), so it is bounded and cycle-checked; whatever is left
+        // goes under _orphans/ rather than being dropped or guessed at.
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = d.parent;
+        let mut seen = std::collections::HashSet::new();
+        let rooted = loop {
+            if cur == ntfs::ROOT_RECORD {
+                break true;
+            }
+            if parts.len() > 64 || !seen.insert(cur) {
+                break false;
+            }
+            match dirs.get(&cur) {
+                Some((name, up)) => {
+                    parts.push(safe_component(name));
+                    cur = *up;
+                }
+                None => break false,
+            }
+        };
+        parts.reverse();
+
+        let mut dir = std::path::PathBuf::from(out_dir);
+        if !flat {
+            if !rooted {
+                orphans += 1;
+                dir.push("_orphans");
+            }
+            for p in &parts {
+                dir.push(p);
+            }
+            std::fs::create_dir_all(&dir)?;
+        }
+
+        // A tree can hold two deleted files with the same name -- different
+        // generations of the same path. Suffix rather than overwrite.
+        let mut dest = dir.join(&safe);
+        if flat {
+            dest = dir.join(format!("{:04}_{}", i, safe));
+        } else if dest.exists() {
+            dest = dir.join(format!("{}.{:04}", safe, i));
+        }
         match fs.read_file(d) {
             Ok(data) => {
                 let partial = (data.len() as u64) < d.size;
@@ -1125,6 +1199,12 @@ pub fn cmd_undelete(target: &str, at: Option<u64>, out_dir: &str, limit: usize) 
         }
     }
     eprintln!("[+] {ok} file(s), {} written to {out_dir}", human(bytes));
+    if !flat && orphans > 0 {
+        eprintln!(
+            "    {orphans} file(s) under _orphans/: the parent directory record\n\
+     was reused, so the original path is unknowable."
+        );
+    }
     eprintln!("    Deleted clusters are free space; anything written to this");
     eprintln!("    volume since may be sitting in them. Check the contents.");
     Ok(())

@@ -14,6 +14,8 @@ const MAGIC: &[u8; 4] = b"FILE";
 const R_USA_OFF: usize = 0x04;
 const R_USA_CNT: usize = 0x06;
 const R_ATTRS: usize = 0x14;
+use std::collections::HashMap;
+
 const R_FLAGS: usize = 0x16;
 
 // Attribute header
@@ -27,6 +29,8 @@ const A_REAL_SIZE: usize = 0x30;
 
 const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
+/// MFT record 5 is the volume root; every path walk ends there.
+pub const ROOT_RECORD: u64 = 5;
 const ATTR_END: u32 = 0xFFFF_FFFF;
 
 fn u16at(b: &[u8], o: usize) -> u16 {
@@ -142,6 +146,22 @@ pub fn attrs(rec: &[u8]) -> Vec<(u32, &[u8])> {
     out
 }
 
+/// The parent directory's MFT record number, from a $FILE_NAME attribute.
+///
+/// The attribute value opens with an 8-byte file reference: 48 bits of record
+/// number and 16 bits of sequence. Only the record number addresses anything.
+fn file_parent(a: &[u8]) -> Option<u64> {
+    if a[A_NONRES] != 0 {
+        return None;
+    }
+    let vo = u16at(a, A_RES_OFF) as usize;
+    let v = a.get(vo..)?;
+    if v.len() < 0x42 {
+        return None;
+    }
+    Some(u64at(v, 0) & 0x0000_FFFF_FFFF_FFFF)
+}
+
 /// The name from a $FILE_NAME attribute, skipping DOS 8.3 aliases.
 fn file_name(a: &[u8]) -> Option<String> {
     if a[A_NONRES] != 0 {
@@ -170,6 +190,8 @@ fn file_name(a: &[u8]) -> Option<String> {
 #[derive(Debug)]
 pub struct Deleted {
     pub name: String,
+    /// MFT record of the directory this file was in, for path rebuilding.
+    pub parent: u64,
     pub size: u64,
     /// Small files live inside the MFT record itself and come back whole.
     pub resident: Option<Vec<u8>>,
@@ -302,6 +324,11 @@ impl<'a> Ntfs<'a> {
             else {
                 continue;
             };
+            let parent = list
+                .iter()
+                .filter(|(t, _)| *t == ATTR_FILE_NAME)
+                .find_map(|(_, a)| file_parent(a))
+                .unwrap_or(ROOT_RECORD);
             let Some((_, data)) = list.iter().find(|(t, _)| *t == ATTR_DATA) else {
                 continue;
             };
@@ -312,6 +339,7 @@ impl<'a> Ntfs<'a> {
                 match data.get(vo..vo + vl) {
                     Some(v) => Deleted {
                         name,
+                        parent,
                         size: vl as u64,
                         resident: Some(v.to_vec()),
                         runs: vec![],
@@ -326,6 +354,7 @@ impl<'a> Ntfs<'a> {
                 }
                 Deleted {
                     name,
+                    parent,
                     size: u64at(data, A_REAL_SIZE),
                     resident: None,
                     runs,
@@ -335,6 +364,48 @@ impl<'a> Ntfs<'a> {
         }
         progress(total, total);
         out
+    }
+
+    /// Every directory on the volume: record number -> (name, parent record).
+    ///
+    /// Deleted directories are included deliberately. When a whole tree is
+    /// removed its directory records are freed exactly like the files', so
+    /// skipping them would flatten the interesting case -- the one where a
+    /// project tree needs putting back -- and keep paths only for files whose
+    /// folder happened to survive.
+    pub fn dirs(&self, progress: impl Fn(u64, u64)) -> HashMap<u64, (String, u64)> {
+        let total = self.records();
+        let mut map = HashMap::new();
+        for n in 0..total {
+            if n % 4096 == 0 {
+                progress(n, total);
+            }
+            let Some(off) = self.record_offset(n) else {
+                break;
+            };
+            let Ok(mut rec) = self.read_record_at(off) else {
+                continue;
+            };
+            if &rec[..4] != MAGIC || !apply_fixup(&mut rec, self.sector) {
+                continue;
+            }
+            // bit 1 = directory. In use or not.
+            if u16at(&rec, R_FLAGS) & 2 == 0 {
+                continue;
+            }
+            let list = attrs(&rec);
+            let names: Vec<_> = list.iter().filter(|(t, _)| *t == ATTR_FILE_NAME).collect();
+            let Some(name) = names.iter().find_map(|(_, a)| file_name(a)) else {
+                continue;
+            };
+            let parent = names
+                .iter()
+                .find_map(|(_, a)| file_parent(a))
+                .unwrap_or(ROOT_RECORD);
+            map.insert(n, (name, parent));
+        }
+        progress(total, total);
+        map
     }
 
     /// Read a deleted file's content back off the volume.
