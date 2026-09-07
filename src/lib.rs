@@ -1070,6 +1070,41 @@ fn safe_component(name: &str) -> String {
     }
 }
 
+/// Rebuild a file's directory path by walking parent references to the root.
+///
+/// Returns the path components outermost-first, and whether the walk actually
+/// reached the volume root. A recovered MFT is not a trustworthy graph: a parent
+/// record may have been reused by an unrelated file (chain simply stops) or now
+/// point at a descendant (chain cycles). Both are bounded here rather than
+/// trusted, and a walk that does not reach the root still returns the components
+/// it did resolve, so an unrooted file keeps whatever partial path is known
+/// instead of being dropped or guessed at.
+fn resolve_path(
+    dirs: &std::collections::HashMap<u64, (String, u64)>,
+    parent: u64,
+) -> (Vec<String>, bool) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = parent;
+    let mut seen = std::collections::HashSet::new();
+    let rooted = loop {
+        if cur == ntfs::ROOT_RECORD {
+            break true;
+        }
+        if parts.len() > 64 || !seen.insert(cur) {
+            break false;
+        }
+        match dirs.get(&cur) {
+            Some((name, up)) => {
+                parts.push(safe_component(name));
+                cur = *up;
+            }
+            None => break false,
+        }
+    };
+    parts.reverse();
+    (parts, rooted)
+}
+
 pub fn cmd_undelete(
     target: &str,
     at: Option<u64>,
@@ -1131,32 +1166,12 @@ pub fn cmd_undelete(
     let mut ok = 0u64;
     let mut bytes = 0u64;
     let mut orphans = 0u64;
+    let mut written: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for (i, d) in found.iter().enumerate() {
         let safe = safe_component(&d.name);
 
-        // Walk parent references up to the root. A chain can be broken (the
-        // parent record reused) or cyclic (a stale reference now pointing at a
-        // descendant), so it is bounded and cycle-checked; whatever is left
-        // goes under _orphans/ rather than being dropped or guessed at.
-        let mut parts: Vec<String> = Vec::new();
-        let mut cur = d.parent;
-        let mut seen = std::collections::HashSet::new();
-        let rooted = loop {
-            if cur == ntfs::ROOT_RECORD {
-                break true;
-            }
-            if parts.len() > 64 || !seen.insert(cur) {
-                break false;
-            }
-            match dirs.get(&cur) {
-                Some((name, up)) => {
-                    parts.push(safe_component(name));
-                    cur = *up;
-                }
-                None => break false,
-            }
-        };
-        parts.reverse();
+        let (parts, rooted) = resolve_path(&dirs, d.parent);
 
         let mut dir = std::path::PathBuf::from(out_dir);
         if !flat {
@@ -1171,12 +1186,20 @@ pub fn cmd_undelete(
         }
 
         // A tree can hold two deleted files with the same name -- different
-        // generations of the same path. Suffix rather than overwrite.
+        // generations of the same path -- so the second is suffixed rather than
+        // overwriting the first.
+        //
+        // Disambiguated against what THIS RUN has written, not against what is
+        // on disk: undelete has no resume, so an interrupted scan is restarted
+        // from record 0, and testing dest.exists() would make the second run
+        // treat every file it already recovered as a name clash and write
+        // foo.c.0001, foo.c.0002 beside it instead of simply replacing it.
         let mut dest = dir.join(&safe);
         if flat {
             dest = dir.join(format!("{:04}_{}", i, safe));
-        } else if dest.exists() {
+        } else if !written.insert(dest.clone()) {
             dest = dir.join(format!("{}.{:04}", safe, i));
+            written.insert(dest.clone());
         }
         match fs.read_file(d) {
             Ok(data) => {
@@ -2490,5 +2513,102 @@ mod tests {
         // VHDX must be >= volume + GPT slack, and 1 MiB aligned
         let d = |v: u64| (v + 8 * MB).div_ceil(MB) * MB;
         assert!(d(100 * MB + 1) > 100 * MB && d(100 * MB + 1) % MB == 0);
+    }
+}
+
+#[cfg(test)]
+mod undelete_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn dirs(entries: &[(u64, &str, u64)]) -> HashMap<u64, (String, u64)> {
+        entries
+            .iter()
+            .map(|(id, name, parent)| (*id, (name.to_string(), *parent)))
+            .collect()
+    }
+
+    #[test]
+    fn a_chain_to_the_root_gives_the_full_path() {
+        let d = dirs(&[(10, "recomp", ntfs::ROOT_RECORD), (11, "ps3", 10)]);
+        let (parts, rooted) = resolve_path(&d, 11);
+        assert!(rooted);
+        assert_eq!(parts, vec!["recomp", "ps3"]);
+    }
+
+    #[test]
+    fn a_file_directly_in_the_root_has_no_components() {
+        let (parts, rooted) = resolve_path(&dirs(&[]), ntfs::ROOT_RECORD);
+        assert!(rooted);
+        assert!(parts.is_empty());
+    }
+
+    // The parent record was reused by something else, so the chain stops early.
+    // The components found so far are still worth keeping.
+    #[test]
+    fn a_broken_chain_keeps_the_part_it_resolved() {
+        let d = dirs(&[(11, "ps3", 10)]); // 10 is missing
+        let (parts, rooted) = resolve_path(&d, 11);
+        assert!(!rooted, "must not claim to have reached the root");
+        assert_eq!(parts, vec!["ps3"]);
+    }
+
+    // A stale parent reference can point at a descendant. Without the seen-set
+    // this walks forever.
+    #[test]
+    fn a_cycle_terminates_and_is_not_rooted() {
+        let d = dirs(&[(10, "a", 11), (11, "b", 10)]);
+        let (parts, rooted) = resolve_path(&d, 10);
+        assert!(!rooted);
+        assert!(parts.len() <= 2, "cycle must not accumulate: {parts:?}");
+    }
+
+    #[test]
+    fn a_self_referential_parent_terminates() {
+        let d = dirs(&[(10, "loop", 10)]);
+        let (_, rooted) = resolve_path(&d, 10);
+        assert!(!rooted);
+    }
+
+    // Depth is bounded so a long adversarial chain cannot run away.
+    #[test]
+    fn depth_is_bounded() {
+        // Numbered above ROOT_RECORD deliberately: a chain that happens to pass
+        // through record 5 terminates as rooted, which is correct behaviour and
+        // would make this test measure nothing.
+        let mut v: Vec<(u64, String, u64)> = Vec::new();
+        for i in 100..600u64 {
+            v.push((i, format!("d{i}"), i + 1));
+        }
+        let d: HashMap<u64, (String, u64)> =
+            v.into_iter().map(|(i, n, p)| (i, (n, p))).collect();
+        let (parts, rooted) = resolve_path(&d, 100);
+        assert!(!rooted);
+        assert!(parts.len() <= 65, "unbounded walk: {} deep", parts.len());
+    }
+
+    // Names come out of freed records; a component must never be able to climb
+    // out of the output directory.
+    #[test]
+    fn components_cannot_escape_the_output_directory() {
+        for bad in ["..", ".", "", "  ", "a/b", r"a\b", "c:", "x*?", "trailing."] {
+            let got = safe_component(bad);
+            assert!(!got.is_empty(), "{bad:?} produced an empty component");
+            assert_ne!(got, "..", "{bad:?} stayed traversable");
+            assert_ne!(got, ".");
+            for c in r#"\/:*?"<>|"#.chars() {
+                assert!(!got.contains(c), "{bad:?} kept {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_control_character_does_not_survive_into_a_filename() {
+        assert!(!safe_component("evil\u{1}name").contains('\u{1}'));
+    }
+
+    #[test]
+    fn an_ordinary_name_is_left_alone() {
+        assert_eq!(safe_component("ppu_hle_nids.cpp"), "ppu_hle_nids.cpp");
     }
 }

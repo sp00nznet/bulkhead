@@ -198,7 +198,11 @@ stranded behind a partition table describing the old disk.
       target is bigger. Refuses the disk hosting the running system
 - [x] `scan` / `scan --rebuild` — find filesystems whose partition table is
       gone and write a new GPT pointing at them
-- [x] `undelete` — recover deleted files from NTFS, resident and non-resident
+- [x] `undelete` — recover deleted files from NTFS, resident and non-resident,
+      into their original directory tree. Run against a real 18 TB volume
+      after `rm -rf` removed ~48 project trees: **815,472 files / 432.6 GB**
+      recovered, 238 git repositories, two corrupt objects in the lot. See
+      [Data recovery](docs/recovery.md#what-this-has-been-run-against)
 - [x] `undo` — put back a table saved by `scan --rebuild`
 - [x] `carve` — signature-based recovery when no filesystem survives
 - [ ] verify (hash the image against the source)

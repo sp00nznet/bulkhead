@@ -62,7 +62,15 @@ clusters free. The record, the name, and the map of where the data lives all
 survive until something reuses them — which is why this works at all, and why
 it stops working the moment you keep using the volume.
 
-Read-only on the source. Small files live inside their MFT record and come back
+Read-only on the source. Files are written into their original directory
+tree, rebuilt from each record's parent reference -- deleted directories
+included, since a removed tree frees its directory records along with its
+files. A chain that cannot be followed to the root (parent record reused, or
+a stale reference that now cycles) puts the file under `_orphans/` with
+whatever partial path did resolve, rather than dropping it or guessing.
+`--flat` writes everything into one directory instead.
+
+Small files live inside their MFT record and come back
 whole; larger ones are read back through their data runs. What comes off the
 platter is whatever is there **now**: those clusters were released on delete, so
 anything written since may be sitting in them. Check what you get.
@@ -72,6 +80,51 @@ record has been reused is gone for good. A file that cannot be fully read is
 reported as PARTIAL with the amount that was readable, never padded out to its
 recorded length — a correctly-sized file of zeros looks like a success and is
 the worst thing a recovery tool can hand back.
+
+## What this has been run against
+
+Not a synthetic test: a stray `rm -rf` with a computed path removed roughly 48
+project trees from an 18 TB NTFS volume, and this is what got them back.
+
+| | |
+|---|---|
+| recovered | **815,472 files, 432.6 GB** |
+| git repositories | 238 |
+| corrupt objects across all of them | **2** |
+| zero-length (record survived, data did not) | 4,176 -- 0.5% |
+| MFT records scanned | 1,003,008 |
+
+The interesting part is not the size, it is that the result could be **checked
+against values known from somewhere else**. Most recovery tools can only tell
+you they wrote something; git can tell you whether what came back is bit-for-bit
+the thing that was lost, because every object is named by the hash of its own
+contents. Four independent checks, by four different mechanisms:
+
+- A packfile recovered **without its `.idx`** was re-indexed from scratch: 2,248
+  objects, 1,580 deltas resolved, and the computed hash came out equal to its own
+  filename. A pack is named by the SHA-1 of its contents, so that is proof of a
+  bit-exact recovery rather than a plausibility check. Six packs were verified
+  this way; none failed.
+- `git fsck` on the recovered repository: **clean**, no output. Every object's
+  hash matches its content and connectivity is complete.
+- A branch that existed on no remote anywhere came back with **992 commits
+  reachable and 117 ahead of master** -- the same 117 measured before the
+  deletion.
+- Two ordinary files matched their known blob hashes: one against a public
+  GitHub copy, and one *locally modified* file against the hash recorded in a
+  `git diff` taken before the loss.
+
+Two objects out of 238 repositories were corrupt -- their clusters had been
+reused before recovery. Both were repairable from a second copy: one from
+another recovered repo that held the same commit, one from GitHub. Worth knowing
+generally: **a corrupt object is a per-object problem, not a per-repo one**, and
+any other clone can rewrite it.
+
+What this run does *not* establish: `undelete` has no resume, so an interrupted
+scan restarts from record 0; and how many files come back PARTIAL depends
+entirely on how much was written to the volume after the deletion. The single
+most important thing is still to stop writing to the volume -- all of the above
+was possible only because nothing had reused those clusters.
 
 ## Carving: the last resort
 
