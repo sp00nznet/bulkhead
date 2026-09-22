@@ -71,9 +71,14 @@ bulkhead -- block-level backup and recovery for Windows
       A window over the read-only operations, for people who do not
       want a command line. Destructive commands stay here.
 
-  bulkhead media <OUT.iso>
+  bulkhead media <OUT.iso> [--drivers <DIR>]
       Build bootable WinPE recovery media with bulkhead in it.
       Needs the Windows ADK and its separate WinPE add-on.
+      This machine's storage and network drivers go in automatically,
+      so build on the machine you expect to recover where you can.
+      --drivers adds a folder of .inf packages as well, for when you
+      cannot -- a vendor RAID or NVMe driver the target needs to see
+      its own disk.
 
 Needs an elevated prompt (raw volume access).";
 
@@ -83,7 +88,7 @@ fn positional<'a>(a: &[&'a str]) -> Vec<&'a str> {
     let mut it = a.iter().copied();
     while let Some(x) = it.next() {
         match x {
-            "--from" | "--to" | "--at" | "--limit" | "--method" | "--cert" => {
+            "--from" | "--to" | "--at" | "--limit" | "--method" | "--cert" | "--drivers" => {
                 it.next();
             }
             _ if x.starts_with("--") => {}
@@ -110,7 +115,7 @@ fn main() {
         ["mount", img] => cmd_mount(img, flag("--rw")),
         ["unmount", img] => cmd_unmount(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
-        ["media", iso] => media::build(iso),
+        ["media", iso] => media::build(iso, opt("--drivers")),
         ["gui"] => gui::run_gui(),
         ["identify", t] => cmd_identify(t, opt("--at").and_then(parse_size)),
         ["erase-info", t] => cmd_erase_info(t),

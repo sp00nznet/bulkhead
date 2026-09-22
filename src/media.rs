@@ -1,8 +1,9 @@
 //! Build bootable WinPE recovery media.
 //!
 //! The ADK already knows how to make WinPE (`copype`, `MakeWinPEMedia`). What
-//! it does not do is put bulkhead in it, or add the optional components our
-//! partitioning path needs -- base WinPE has no PowerShell at all.
+//! it does not do is put bulkhead in it, add the optional components our
+//! partitioning path needs -- base WinPE has no PowerShell at all -- or carry
+//! the driver for the controller the disk is actually behind.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,6 +19,21 @@ const COMPONENTS: &[&str] = &[
     "WinPE-PowerShell",
     "WinPE-StorageWMI",
 ];
+
+/// Driver classes harvested from the build machine into the media.
+///
+/// WinPE ships an inbox driver set that covers commodity AHCI and NVMe and
+/// stops there. The controller it does not know about is the one holding the
+/// disk you came to recover, and the failure mode is a recovery prompt that
+/// lists no disks at all.
+///
+/// ponytail: a class filter, not a boot-criticality query. `Get-WindowsDriver`
+/// only reports `BootCritical` on the per-driver advanced object, which is a
+/// DISM round trip each; these three classes are what actually strands a boot
+/// -- the disk controller, the legacy ATA controller, and the NIC for pulling
+/// an image off a NAS. Widen the list if a machine turns up whose boot device
+/// hides somewhere else.
+const DRIVER_CLASSES: &[&str] = &["SCSIAdapter", "HDC", "Net"];
 
 const STARTNET: &str = "\
 @echo off
@@ -154,7 +170,7 @@ fn cli_exe() -> Res<std::path::PathBuf> {
     .into())
 }
 
-pub fn build(out_iso: &str) -> Res<()> {
+pub fn build(out_iso: &str, extra: Option<&str>) -> Res<()> {
     // Checked up front because the first thing that needs it is a DISM
     // preflight whose failure is neither fatal nor obviously about privilege.
     let admin = ps(
@@ -248,7 +264,7 @@ pub fn build(out_iso: &str) -> Res<()> {
 
     // From here on, unmount before returning any error -- leaving an image
     // mounted wedges the next run and needs a manual /Cleanup-Wim.
-    let r = populate(&exe, &mount, &ocs);
+    let r = populate(&exe, &mount, &ocs, extra);
     let unmount = sh(
         "committing boot.wim",
         &format!(
@@ -275,7 +291,88 @@ pub fn build(out_iso: &str) -> Res<()> {
     Ok(())
 }
 
-fn populate(exe: &Path, mount: &Path, ocs: &Path) -> Res<()> {
+/// The PowerShell that copies this machine's matching driver packages into
+/// `dir`, and prints how many it found.
+///
+/// Split out from [`harvest_drivers`] so a test can read it without a driver
+/// store, an elevated prompt or ten minutes of DISM.
+fn harvest_script(dir: &Path) -> String {
+    let classes = DRIVER_CLASSES
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // Copy the whole package directory, not the .inf: the .sys and the .cat
+    // live beside it in the DriverStore and DISM needs a tree it can walk.
+    //
+    // The count comes from the collected array rather than a `$i++` inside the
+    // loop -- ForEach-Object's block is a child scope, so the increment would
+    // write to a copy and this would always report zero.
+    format!(
+        "$found = @(Get-WindowsDriver -Online | Where-Object {{ $_.ClassName -in {classes} }});
+         $found | ForEach-Object {{
+            $p = Split-Path $_.OriginalFileName;
+            Copy-Item -Recurse -Force -LiteralPath $p \
+                      -Destination (Join-Path '{}' (Split-Path $p -Leaf)) }};
+         $found.Count",
+        dir.display()
+    )
+}
+
+/// Copy this machine's third-party storage and network drivers into `dir`.
+///
+/// `-Online` without `-All` is already only the out-of-box drivers, which is
+/// the right set: the inbox ones are what WinPE has too.
+fn harvest_drivers(dir: &Path) -> Res<u32> {
+    let out = ps(&harvest_script(dir))?;
+    out.trim()
+        .parse()
+        .map_err(|_| format!("expected a driver count, got {out:?}").into())
+}
+
+/// Add every driver package under `src` to the mounted image.
+fn add_drivers(mount: &Path, src: &Path) -> Res<()> {
+    sh(
+        &format!("injecting drivers from {}", src.display()),
+        &format!(
+            "dism /Image:\"{}\" /Add-Driver /Driver:\"{}\" /Recurse",
+            mount.display(),
+            src.display()
+        ),
+    )
+}
+
+/// Harvest and inject, best-effort.
+///
+/// Deliberately never fatal. This runs several minutes into a DISM build and
+/// the media is still worth having without it -- WinPE's inbox set covers
+/// commodity AHCI and NVMe, which is most machines. Say plainly what is
+/// missing rather than throwing the build away.
+fn install_drivers(mount: &Path) {
+    let store = std::env::temp_dir().join("bulkhead-winpe-drivers");
+    let _ = std::fs::remove_dir_all(&store);
+    if let Err(e) = std::fs::create_dir_all(&store) {
+        eprintln!("[!] cannot stage drivers in {}: {e}", store.display());
+        return;
+    }
+    eprintln!("[*] harvesting this machine's storage and network drivers");
+    match harvest_drivers(&store) {
+        Ok(0) => eprintln!(
+            "[!] no third-party {} drivers here -- media carries WinPE's inbox set only",
+            DRIVER_CLASSES.join("/")
+        ),
+        Ok(n) => {
+            eprintln!("[*] {n} driver package(s) to inject");
+            if let Err(e) = add_drivers(mount, &store) {
+                eprintln!("[!] {e}\n    media will boot, but only for controllers WinPE knows");
+            }
+        }
+        Err(e) => eprintln!("[!] harvest failed: {e}\n    building without added drivers"),
+    }
+    let _ = std::fs::remove_dir_all(&store);
+}
+
+fn populate(exe: &Path, mount: &Path, ocs: &Path, extra: Option<&str>) -> Res<()> {
     for c in COMPONENTS {
         let cab = ocs.join(format!("{c}.cab"));
         need(&cab, c)?;
@@ -301,10 +398,46 @@ fn populate(exe: &Path, mount: &Path, ocs: &Path) -> Res<()> {
         }
     }
 
+    install_drivers(mount);
+
+    // An explicit --drivers is a request, not a convenience: if it fails, the
+    // user asked for something they did not get, and almost certainly asked
+    // because their controller is the one WinPE cannot see.
+    if let Some(d) = extra {
+        let d = Path::new(d);
+        need(d, "--drivers directory")?;
+        add_drivers(mount, d)?;
+    }
+
     let sys32 = mount.join("Windows").join("System32");
     eprintln!("[*] installing bulkhead.exe");
     std::fs::copy(exe, sys32.join("bulkhead.exe"))?;
     install_comctl32(&sys32)?;
     std::fs::write(sys32.join("startnet.cmd"), STARTNET.replace('\n', "\r\n"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The harvest query is the one piece of real logic here that does not
+    /// need an ADK, an elevated prompt or ten minutes to get wrong.
+    #[test]
+    fn harvest_script_quotes_classes_and_destination() {
+        let s = harvest_script(Path::new(r"C:\Temp\drv"));
+        // Each class single-quoted inside the -in list, or the filter matches
+        // nothing and the media silently ships with no added drivers.
+        for c in DRIVER_CLASSES {
+            assert!(s.contains(&format!("'{c}'")), "{c} not quoted in: {s}");
+        }
+        assert!(s.contains("-in 'SCSIAdapter','HDC','Net'"), "{s}");
+        assert!(
+            s.contains(r"'C:\Temp\drv'"),
+            "destination not quoted in: {s}"
+        );
+        // Counting the array, not incrementing inside ForEach-Object.
+        assert!(s.contains("$found.Count"), "{s}");
+        assert!(!s.contains("$i++"), "{s}");
+    }
 }
