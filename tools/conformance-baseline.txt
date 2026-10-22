@@ -20,3 +20,6 @@ smoke: partition moved, filesystem intact
 smoke: lost partition table rebuilt from filesystem headers
 smoke: deleted file recovered byte-for-byte
 smoke: file carved from raw bytes by signature
+smoke: verify checks images and refuses a broken chain
+smoke: undelete refuses to write onto its source
+smoke: imaging left the deleted file recoverable

@@ -136,6 +136,7 @@ try {
     # must not: that is the chain break verify exists to catch.
     foreach ($v in @($img, $inc, $dsk)) {
         $vout = Capture-Bulkhead verify $v
+        Write-Host $vout
         if ($LASTEXITCODE -ne 0 -or $vout -notmatch 'verified') { throw "FAIL  verify $v`n$vout" }
         if ($vout -notmatch 'NTFS, \d+ MFT records') { throw "FAIL  verify did not walk the NTFS volume in $v`n$vout" }
     }
