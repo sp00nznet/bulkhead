@@ -65,9 +65,10 @@ Reading a Linux root filesystem that Windows won't mount:
    [latest release](https://github.com/sp00nznet/bulkhead/releases/latest)
    into **the same folder**. The window runs `bulkhead.exe` for every
    operation, so it needs it next to it.
-2. Right-click `bulkhead-gui.exe` and choose **Run as administrator**. Reading
-   disks directly needs it.
-3. The window lists your disks. Pick one and press the button for the job.
+2. Double-click `bulkhead-gui.exe` and say **Yes** to the administrator
+   prompt. Reading disks directly needs it.
+3. The window lists your disks. Pick one: the line under the list says which
+   disk it is and which buttons work on it. Press the button for the job.
 
 There's nothing to install. Windows SmartScreen may warn about an unsigned
 download: **More info**, then **Run anyway**.

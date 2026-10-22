@@ -44,6 +44,7 @@ serial against.
 | Group | Button | Runs |
 |---|---|---|
 | Back up | Disk -> image | `image <selection> <image file>` |
+| | Verify image | `verify <image file>`: every byte reads, the chain opens, every filesystem walks |
 | | Mount image / Unmount | `mount` / `unmount <image file>` |
 | Recover | Scan for partitions | `scan <disk>` (read-only) |
 | | Rebuild table | `scan <disk> --rebuild`, after a confirmation naming the disk |
@@ -55,8 +56,8 @@ serial against.
 | | Bring disk online | `Set-Disk -IsOffline $false`, after a restore |
 
 Paths are checked before anything starts: a new image needs a `.vhdx` name in
-a folder that exists and mustn't overwrite one; mount, unmount and restore
-need an image that exists; the recover-into folder needs a full path on a
+a folder that exists and mustn't overwrite one; mount, unmount, restore
+and verify need an image that exists; the recover-into folder needs a full path on a
 drive that exists. Browse for the image is an Open dialog: pick an image to
 mount or restore, or type a new name to image into.
 

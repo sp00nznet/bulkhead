@@ -75,12 +75,14 @@ const ID_OVERWRITE: usize = 211;
 const ID_REBUILD: usize = 212;
 const ID_ONLINE: usize = 213;
 const ID_ELEVATE: usize = 214;
+const ID_VERIFY: usize = 215;
 
 /// Every button that starts something. Greyed out while a command runs, and
 /// each is live only for the kind of row it can act on (`allowed`).
-const ACTIONS: [usize; 13] = [
+const ACTIONS: [usize; 14] = [
     ID_REFRESH,
     ID_IMAGE,
+    ID_VERIFY,
     ID_MOUNT,
     ID_UNMOUNT,
     ID_SCAN,
@@ -588,7 +590,7 @@ fn translate(line: &str) -> Option<String> {
          for what was found."
             .into()
     } else if says("mount it:  bulkhead mount") {
-        "    Press Mount image to open it as a drive.".into()
+        "    Press Verify image to check it will restore, or Mount image to open it.".into()
     } else if says("detach with:  bulkhead unmount") {
         "    It's in Explorer now. Press Unmount to detach it.".into()
     } else if says("bring it online with:  Set-Disk") {
@@ -1031,6 +1033,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     Some(e) => say(&e),
                     None => go(vec!["image", &arg, &image_path], None),
                 },
+                ID_VERIFY => match check_existing_image(&image_path) {
+                    Some(e) => say(&e),
+                    None => go(vec!["verify", &image_path], None),
+                },
                 ID_MOUNT => match check_existing_image(&image_path) {
                     Some(e) => say(&e),
                     None => go(vec!["mount", &image_path], None),
@@ -1216,6 +1222,8 @@ const HELP: &str = "How to use this:
   2. Press a button. What bulkhead does shows here; the bar shows progress.
 
 Back up      Disk -> image copies the selection into the image file.
+             Verify image checks an image will restore: every byte
+             reads and every filesystem in it opens.
              Mount image opens an image as a drive; Unmount closes it.
 Recover      Scan looks for partitions whose table is lost; Rebuild table
              writes one pointing at them (the old table is saved first).
@@ -1388,6 +1396,7 @@ pub fn run_gui() -> Res<()> {
                 w!("Back up:"),
                 &[
                     (ID_IMAGE, w!("Disk -> image"), 110),
+                    (ID_VERIFY, w!("Verify image"), 95),
                     (ID_MOUNT, w!("Mount image"), 100),
                     (ID_UNMOUNT, w!("Unmount"), 85),
                 ][..],
