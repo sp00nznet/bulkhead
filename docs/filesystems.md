@@ -67,14 +67,14 @@ counts.
 | XFS | **pass** — same three |
 | XFS via a mounted drive | **pass** |
 | ext2 | **refused correctly** — no extents, so it declines rather than guessing |
-| HFS+ | **pass** in CI, where Ubuntu's kernel can fill the image; skipped under WSL, whose kernel can't |
+| HFS+, and via a mounted drive | **pass** in CI, where Ubuntu's kernel can fill the image; skipped under WSL, whose kernel can't |
 | HFS+ and HFSX, made by macOS | **pass** — `hdiutil create -fs HFS+` on a real Mac, six files matching macOS's own `md5` (2026-08-31, by hand) |
 
 CI runs all of this on every push: `tools/corpus.sh` builds the images on a
 Linux runner, `tools/conformance.ps1` checks them on Windows, and a check that
 used to pass and stops passing fails the build. `fs-smoke.ps1` runs the same
-two pieces locally through WSL. `mount-fs` is proven on ext4 and XFS; HFS+
-through a drive letter has no check yet.
+two pieces locally through WSL. All three filesystems pass through a drive
+letter too (`mount-fs`), in CI.
 
 It found a real bug. XFS listed directories and reported correct file sizes but
 returned every file **empty** — the `NREXT64` feature, on by default in current

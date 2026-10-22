@@ -13,7 +13,7 @@ not every path has been run on every kind of hardware. `restore`,
 `erase`, `part move` and `scan --rebuild` write to disks and can't be undone:
 read what they print before saying yes.
 
-**Conformance: 9 of 10 checks pass** locally and in CI (`tools/conformance.ps1`):
+**Conformance: 20 of 20 checks pass** in CI on every push (`tools/conformance.ps1`):
 real ext2/ext4/XFS/HFS+ images made by each filesystem's own `mkfs`, read back
 and hashed, mounted as drives, and the image/restore/move/rebuild/undelete/carve
 stages on throwaway disks. A check that stops passing fails the build.
@@ -159,7 +159,7 @@ Checked 2026-10-22, from third-party listings where vendors don't publish prices
 | Job | Paid option | bulkhead |
 |---|---|---|
 | Disk imaging | Macrium Reflect Free reached end of life in January 2024; Reflect X Home is about $45-50 a year per PC. Acronis True Image is subscription-only, from $49.99 a year. AOMEI Backupper Standard, MiniTool ShadowMaker Free and EaseUS Todo Free still image and restore for free, and charge for cloning, scheduling and media extras | Images and restores to VHDX, which opens without bulkhead. No scheduler: run it from Task Scheduler |
-| Linux filesystems on Windows | Paragon Linux File Systems for Windows, about $30. It also writes ext4 and reads btrfs, which bulkhead doesn't | Reads ext4, XFS and HFS+, and mounts ext4 and XFS as a drive letter |
+| Linux filesystems on Windows | Paragon Linux File Systems for Windows, about $30. It also writes ext4 and reads btrfs, which bulkhead doesn't | Reads ext4, XFS and HFS+, and mounts them as a read-only drive letter |
 | Drive erasure with a report | Blancco Drive Eraser, sold per drive per year (about $7-18 a drive through resellers) | ATA SANITIZE and overwrite, with a certificate. NVMe isn't proven yet, and the certificate isn't signed |
 
 Sources: [gHacks](https://www.ghacks.net/?p=182006) on Reflect Free,
