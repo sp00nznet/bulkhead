@@ -309,6 +309,23 @@ try {
     Write-VolumeCache -DriveLetter $rec.DriveLetter
     Start-Sleep -Seconds 2
 
+    # Output onto the volume being recovered would land in the free space
+    # being read. It has to be refused, not done.
+    & $exe undelete $vol --to "$vol\rescued" 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0 -or (Test-Path "$vol\rescued")) { throw "FAIL  undelete wrote onto its own source" }
+    Write-Host "`nPASS  undelete refuses to write onto its source" -ForegroundColor Green
+
+    # Image the volume between the delete and the undelete. A VSS snapshot
+    # writes its diff area onto the volume and reuses the deleted file's MFT
+    # record; nothing has this volume open, so image must lock it instead and
+    # leave the record alone. The undelete below proves it did.
+    $afterDel = Join-Path $work 'after-delete.vhdx'
+    Remove-Item $afterDel -ErrorAction SilentlyContinue
+    $imgOut = & $exe image $vol $afterDel 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "image before undelete failed:`n$imgOut" }
+    if ($imgOut -notmatch 'locked') { throw "FAIL  an idle volume was snapshotted, not locked:`n$imgOut" }
+    Remove-Item $afterDel -ErrorAction SilentlyContinue
+
     $recovered = Join-Path $work 'recovered'
     Write-Host "`n[*] bulkhead undelete $vol --to $recovered"
     & $exe undelete $vol --to $recovered
@@ -344,6 +361,7 @@ try {
     }
 
     Write-Host "`nPASS  deleted file recovered byte-for-byte" -ForegroundColor Green
+    Write-Host "`nPASS  imaging left the deleted file recoverable" -ForegroundColor Green
 
     # --- carving -----------------------------------------------------------
     # A synthetic JPEG: real magic, real footer, and a payload that cannot

@@ -113,7 +113,9 @@ if (-not $NoSmoke) {
         'restore to a larger disk, GPT relocated'
         'partition moved, filesystem intact'
         'lost partition table rebuilt from filesystem headers'
+        'undelete refuses to write onto its source'
         'deleted file recovered byte-for-byte'
+        'imaging left the deleted file recoverable'
         'file carved from raw bytes by signature'
     )
     $log = Join-Path $env:TEMP 'bulkhead-smoke.log'

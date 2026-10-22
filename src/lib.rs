@@ -394,10 +394,126 @@ fn partitions(disk: u32) -> Res<Vec<Part>> {
     Ok(v)
 }
 
+/// Drive letters a target occupies: its own for a volume, every partition's
+/// for a disk, none for an image file (writing beside an image doesn't change it).
+fn target_letters(target: &str) -> Res<Vec<char>> {
+    if std::path::Path::new(target).is_file() {
+        return Ok(Vec::new());
+    }
+    if let Some(n) = disk_arg(target) {
+        return Ok(partitions(n)?.iter().filter_map(|p| p.letter).collect());
+    }
+    Ok(drive_letter(target).into_iter().collect())
+}
+
+/// `X:...` -> `X`, uppercase. A path that doesn't resolve to a drive letter
+/// (UNC) -> None.
+fn drive_letter(path: &str) -> Option<char> {
+    let abs = std::path::absolute(path).ok()?;
+    let s = abs.to_string_lossy();
+    let mut c = s.trim_start_matches(r"\\?\").chars();
+    match (c.next(), c.next()) {
+        (Some(l), Some(':')) if l.is_ascii_alphabetic() => Some(l.to_ascii_uppercase()),
+        _ => None,
+    }
+}
+
+/// Refuse to write `out` onto the volume or disk being read.
+///
+/// Recovery reads free space and deleted records. Output written onto the same
+/// volume lands in exactly that free space and destroys what is being
+/// recovered; an image written into the volume it images changes its own
+/// source. QA found undelete doing the first without a word.
+///
+/// ponytail: drive letters only. A volume mounted in a folder (C:\mnt\data)
+/// isn't caught; GetVolumePathNameW plus volume GUIDs would catch it.
+fn refuse_output_on(target: &str, out: &str, what: &str) -> Res<()> {
+    let Some(o) = drive_letter(out) else {
+        return Ok(());
+    };
+    if target_letters(target)?.contains(&o) {
+        return Err(format!(
+            "{out} is on {o}:, which is part of {target}. Writing {what} there would \
+             overwrite the free space being read. Pick a folder on another drive."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Hold a volume still while it is read.
+///
+/// Locked is preferred: nothing else can write, and nothing is written to the
+/// volume either. A VSS snapshot is the fallback for a volume in use (the
+/// running C:, an open Explorer window), and it has a cost: VSS keeps its diff
+/// area as files on the same volume, and NTFS reuses deleted files' MFT records
+/// for them, so a snapshot destroys files `undelete` could have recovered.
+enum Held {
+    Locked(Raw),
+    Shadow(Snapshot),
+}
+
+impl Held {
+    fn take(volume: &str) -> Res<Held> {
+        let letter = volume.trim_end_matches('\\').trim_end_matches(':');
+        // Opened for write only because FSCTL_LOCK_VOLUME wants it; nothing is
+        // written through this handle.
+        if let Ok(v) = Raw::open(&format!(r"\\.\{letter}:"), true)
+            && v.fsctl(FSCTL_LOCK_VOLUME).is_ok()
+        {
+            eprintln!("[*] {letter}: locked; nothing is written to it while it's read");
+            return Ok(Held::Locked(v));
+        }
+        eprintln!("[!] {letter}: is in use, so it's read through a VSS snapshot. The snapshot");
+        eprintln!("    writes to {letter}: and can overwrite deleted files there. To undelete");
+        eprintln!("    from {letter}:, do that first, or close what has it open and retry.");
+        Ok(Held::Shadow(Snapshot::create(&format!("{letter}:"))?))
+    }
+
+    /// A handle to read the held volume through.
+    fn reader(&self) -> Res<Raw> {
+        match self {
+            Held::Locked(v) => Ok(Raw(dup(v.0)?)),
+            Held::Shadow(sn) => Raw::open(&sn.device, false).ctx("open snapshot"),
+        }
+    }
+
+    fn release(&self) {
+        if let Held::Shadow(sn) = self {
+            eprintln!("[*] releasing snapshot");
+            if let Err(e) = sn.delete() {
+                eprintln!("[!] snapshot {} not released: {e}", sn.id);
+            }
+        }
+    }
+}
+
+/// A second handle on the same open volume, so it can be read through the
+/// handle that holds the lock without giving the lock away.
+fn dup(h: HANDLE) -> Res<HANDLE> {
+    use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut out = HANDLE::default();
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            h,
+            GetCurrentProcess(),
+            &mut out,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+        .ctx("duplicate volume handle")?;
+    }
+    Ok(out)
+}
+
 /// Image a whole disk: the partition table, every partition, and the gaps.
 ///
-/// Mounted volumes are read through their own VSS snapshot so a live system
-/// stays consistent; everything else is copied raw. The GPT is copied verbatim
+/// Mounted volumes are locked, or failing that read through a VSS snapshot
+/// (see `Held`), so a live system stays consistent; everything else is copied
+/// raw. The GPT is copied verbatim
 /// rather than rebuilt, so the VHDX is the same size as the source and its
 /// backup GPT lands on the same LBA -- which is what makes the image directly
 /// bootable instead of merely restorable.
@@ -416,15 +532,14 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
         return Err(format!("disk {disk} has no partitions").into());
     }
 
-    // Snapshot every mounted volume before copying anything, so the whole
-    // image is one point in time rather than one per partition.
-    let mut shadows: Vec<(usize, Snapshot)> = Vec::new();
+    // Hold every mounted volume before copying anything, so the whole image
+    // is one point in time rather than one per partition.
+    let mut shadows: Vec<(usize, Held)> = Vec::new();
     if use_vss {
         for (i, p) in parts.iter().enumerate() {
             let Some(l) = p.letter else { continue };
-            eprintln!("[*] snapshotting {l}:");
-            match Snapshot::create(&format!("{l}:")) {
-                Ok(sn) => shadows.push((i, sn)),
+            match Held::take(&format!("{l}:")) {
+                Ok(h) => shadows.push((i, h)),
                 // Not a failure worth stopping for: an unsnapshottable volume
                 // is copied raw, which is exactly right for the FAT and
                 // removable volumes VSS declines.
@@ -438,10 +553,8 @@ fn image_disk(disk: u32, out: &str, use_vss: bool, parent: Option<&str>) -> Res<
 
     let r = image_disk_inner(&phys, disk_size, sector, &parts, &shadows, out, parent);
 
-    for (_, sn) in &shadows {
-        if let Err(e) = sn.delete() {
-            eprintln!("[!] snapshot {} not released: {e}", sn.id);
-        }
+    for (_, h) in &shadows {
+        h.release();
     }
     r
 }
@@ -451,7 +564,7 @@ fn image_disk_inner(
     disk_size: u64,
     sector: u32,
     parts: &[Part],
-    shadows: &[(usize, Snapshot)],
+    shadows: &[(usize, Held)],
     out: &str,
     parent: Option<&str>,
 ) -> Res<()> {
@@ -495,8 +608,8 @@ fn image_disk_inner(
             raw(pos, p.offset - pos, "gap")?;
         }
         match shadows.iter().find(|(j, _)| *j == i) {
-            Some((_, sn)) => {
-                let src = Raw::open(&sn.device, false).ctx("open snapshot")?;
+            Some((_, h)) => {
+                let src = h.reader()?;
                 let vol_size = src.len()?.min(p.size);
                 let alloc = bitmap::read(src.0, vol_size)?;
                 let label = format!("partition {} ({}:)", i + 1, p.letter.unwrap_or('?'));
@@ -533,38 +646,28 @@ fn image_disk_inner(
 }
 
 pub fn cmd_image(volume: &str, out: &str, use_vss: bool, parent: Option<&str>) -> Res<()> {
+    refuse_output_on(volume, out, "the image")?;
     if let Some(n) = disk_arg(volume) {
         return image_disk(n, out, use_vss, parent);
     }
-    let shadow = if use_vss {
-        eprintln!("[*] snapshotting {volume}");
-        Some(Snapshot::create(volume)?)
-    } else {
-        None
-    };
-    // Bare `\\.\C:` (no trailing slash) is the raw volume; the shadow device is
-    // already a raw path.
-    let src_path = match &shadow {
-        Some(s) => s.device.clone(),
-        None => {
-            format!(
-                r"\\.\{}",
-                volume.trim_end_matches('\\').trim_end_matches(':')
-            ) + ":"
-        }
-    };
-    let r = image_inner(&src_path, out, parent);
-    if let Some(s) = &shadow {
-        eprintln!("[*] releasing snapshot");
-        if let Err(e) = s.delete() {
-            eprintln!("[!] snapshot {} not released: {e}", s.id);
-        }
+    // Bare `\\.\C:` (no trailing slash) is the raw volume.
+    let src_path = format!(
+        r"\\.\{}:",
+        volume.trim_end_matches('\\').trim_end_matches(':')
+    );
+    if !use_vss {
+        let src = Raw::open(&src_path, false).ctx("open source volume")?;
+        return image_inner(&src, &src_path, out, parent);
     }
+    let held = Held::take(volume)?;
+    let r = held
+        .reader()
+        .and_then(|src| image_inner(&src, &src_path, out, parent));
+    held.release();
     r
 }
 
-fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
-    let src = Raw::open(src_path, false).ctx("open source volume")?;
+fn image_inner(src: &Raw, src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     let vol_size = src.len()?;
     eprintln!("[*] source {src_path} ({})", human(vol_size));
 
@@ -640,7 +743,7 @@ fn image_inner(src_path: &str, out: &str, parent: Option<&str>) -> Res<()> {
     );
     let dst = Raw::open(&vhd.physical_path()?, true).ctx("open attached vhdx")?;
     Region {
-        src: &src,
+        src,
         src_off: 0,
         dst: &dst,
         dst_off: offset,
@@ -1118,6 +1221,7 @@ pub fn cmd_undelete(
     limit: usize,
     flat: bool,
 ) -> Res<()> {
+    refuse_output_on(target, out_dir, "recovered files")?;
     let (path, base) = match disk_arg(target) {
         Some(n) => (format!(r"\\.\PhysicalDrive{n}"), at.unwrap_or(0)),
         None => {
@@ -1244,6 +1348,7 @@ pub fn cmd_carve(target: &str, out_dir: &str, limit: usize) -> Res<()> {
     // The same opener as ls, cp and undelete. carve had its own copy that
     // only knew disks and volumes, so an image file -- the way every other
     // reader gets tested without the media -- failed with a bare 0x8007007B.
+    refuse_output_on(target, out_dir, "carved files")?;
     let (disk, _, name) = open_target(target, None)?;
     let size = disk.len()?;
     eprintln!("[*] carving {name} ({})", human(size));
@@ -2393,6 +2498,17 @@ pub fn cmd_unmount(path: &str) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The output guard compares drive letters, so these have to come out right.
+    #[test]
+    fn output_drive_letters() {
+        assert_eq!(drive_letter(r"d:\rescued"), Some('D'));
+        assert_eq!(drive_letter(r"\\?\E:\x"), Some('E'));
+        assert_eq!(drive_letter(r"\\server\share\x"), None);
+        // a volume target is refused against its own letter, case-insensitive
+        assert!(refuse_output_on("r:", r"R:\rescued", "files").is_err());
+        assert!(refuse_output_on("R:", r"S:\rescued", "files").is_ok());
+    }
 
     /// Differencing-disk creation needs no elevation, so it is testable here.
     #[test]
