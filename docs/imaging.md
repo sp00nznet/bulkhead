@@ -50,7 +50,18 @@ day you restore. It then reads every byte and opens every partition's
 filesystem: NTFS by reading its whole MFT, ext4, XFS and HFS+ by walking every
 directory.
 
-VERIFY_SAMPLE
+A whole-disk image of a 512 MB test disk, on a Windows 11 VM:
+
+```
+> bulkhead verify C:\netlab\bhverify\disk.vhdx
+[*] reading all 512.0 MB of the image
+  SHA-256 bd8b60f7605ec92396ae5173e26ae26fe504fb8f0e6b8f1fce6cffc69274adb8
+  --  partition 1 at 17.0 KB (16.0 MB): no NTFS, ext4, XFS or HFS+ here to check
+  ok  partition 2 at 16.0 MB (495.9 MB): NTFS, 256 MFT records read, 7 directories
+[+] C:\netlab\bhverify\disk.vhdx verified: it reads end to end and every filesystem in it opens
+```
+
+Partition 1 is the Microsoft Reserved partition, which holds no filesystem.
 
 The SHA-256 is of the image. Run `verify` again later and the same digest
 means nothing has changed. It doesn't compare the image with the source: a
