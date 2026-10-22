@@ -42,6 +42,9 @@ from it did not boot. All three are fixed below.
 - `carve` refused filesystem image files that every other reader accepts
   (97036ff).
 - CI had been failing on `cargo fmt --check` since 2026-09-07 (2eeebd1).
+- WinFsp's licence exception requires its copyright notice in the user
+  interface and docs. v0.1.0 didn't carry it; `mount-fs`'s help, the README and
+  the filesystem docs now do.
 
 ## [0.1.0] - 2026-08-31
 

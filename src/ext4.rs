@@ -127,8 +127,7 @@ pub fn dir_entries(block: &[u8]) -> Vec<DirEntry> {
 /// The 32 bits at 0x6C are `i_size_high` **only for a regular file**. For a
 /// directory, symlink or device the same field is `i_dir_acl`, and folding it
 /// into the size invents terabytes -- a Debian `/usr` listed as 11256861.9 TB
-/// is how this was found. Linux gates it on `S_ISREG` in `ext4_isize()` and so
-/// do we.
+/// is how this was found. So the high half counts only for regular files.
 ///
 /// ponytail: ignores the `largedir` feature, which also allows a high size on
 /// directories. Nothing here uses a directory's byte size.

@@ -56,6 +56,7 @@ bulkhead -- block-level backup and recovery for Windows
   bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
       Mount an ext4, XFS or HFS+ volume as a Windows drive, read-only.
       Needs WinFsp (winget install WinFsp.WinFsp).
+      WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp
 
   bulkhead erase-info <diskN>
       What erase commands a drive supports, and what is stopping one.

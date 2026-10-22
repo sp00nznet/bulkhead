@@ -66,7 +66,8 @@ three files off this Linux disk" is also something file-level restore needs.
   [design notes](design.md).
 - **WinFsp** is loaded with `LoadLibraryW` only by `mount-fs`, so every other
   command works without it and building needs no SDK. WinFsp is GPLv3 with an
-  exception for free and open-source software, which covers MIT bulkhead.
+  exception for free and open-source software; bulkhead meets its conditions,
+  including carrying its notice ([Reading ext4, XFS and HFS+](filesystems.md)).
 
 ---
 

@@ -3,7 +3,7 @@
 //! When the MFT is gone there are no names, no sizes and no maps -- only bytes.
 //! Most formats announce themselves with a magic number at the front, and many
 //! mark their own end, so a file can be lifted out whole without knowing
-//! anything about the filesystem that held it. This is what PhotoRec does.
+//! anything about the filesystem that held it.
 //!
 //! What it cannot do is reassemble a fragmented file: a carved file is one
 //! contiguous stretch, so anything the filesystem scattered comes back broken

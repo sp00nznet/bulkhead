@@ -45,8 +45,12 @@ create, including opening an existing file for reading. Both answer
 This needs **WinFsp** (`winget install WinFsp.WinFsp`), the only dependency
 here that does not ship with Windows. It is loaded at runtime rather than
 linked, so every other command works without it and building bulkhead needs no
-SDK. WinFsp is GPLv3 with an exception for free software, which bulkhead's MIT
-licence falls under; a proprietary fork would need a licence from its authors.
+SDK.
+
+WinFsp is GPLv3 with an exception for free and open-source software. bulkhead
+meets it by being MIT, by not shipping WinFsp with anything proprietary, and by
+carrying its notice: **WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos** (https://github.com/winfsp/winfsp). A proprietary fork would need a
+licence from WinFsp's author.
 
 ## Verified against the real thing
 

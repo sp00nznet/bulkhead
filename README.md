@@ -207,3 +207,6 @@ executable. Why that's worth doing is in [PHILOSOPHY.md](PHILOSOPHY.md).
 ## License
 
 MIT. See [LICENSE](LICENSE). Security issues: [SECURITY.md](SECURITY.md).
+
+`mount-fs` uses WinFsp, loaded at runtime if it's installed: WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos,
+<https://github.com/winfsp/winfsp>.
