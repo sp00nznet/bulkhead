@@ -8,7 +8,7 @@ and it builds its own bootable WinPE recovery ISO.
 
 ## Status
 
-**v0.1.0, alpha.** Every command has been run against real disks or VMs, but
+**v0.2.0, alpha.** Every command has been run against real disks or VMs, but
 not every path has been run on every kind of hardware. `restore`,
 `erase`, `part move` and `scan --rebuild` write to disks and can't be undone:
 read what they print before saying yes.

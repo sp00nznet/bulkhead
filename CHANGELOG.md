@@ -6,9 +6,14 @@ All notable changes to bulkhead. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 **If you built recovery media with v0.1.0, rebuild it.** The ISO's command-line
 binary could not load in WinPE, the GUI was missing from it, and a disk restored
 from it did not boot. All three are fixed below.
+
+**v0.1.0's `image` could destroy deleted files.** Imaging a volume before
+undeleting from it lost the files you were about to recover. Fixed below.
 
 ### Added
 - `verify`: attaches an image read-only (so a broken incremental chain fails
@@ -98,5 +103,6 @@ window).
 - `media`: bootable WinPE recovery ISO.
 - `gui`: a native Win32 window over the same commands.
 
-[Unreleased]: https://github.com/sp00nznet/bulkhead/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sp00nznet/bulkhead/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sp00nznet/bulkhead/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sp00nznet/bulkhead/releases/tag/v0.1.0
