@@ -13,7 +13,7 @@ not every path has been run on every kind of hardware. `restore`,
 `erase`, `part move` and `scan --rebuild` write to disks and can't be undone:
 read what they print before saying yes.
 
-**Conformance: 20 of 20 checks pass** in CI on every push (`tools/conformance.ps1`):
+**Conformance: 23 of 23 checks pass** in CI on every push (`tools/conformance.ps1`):
 real ext2/ext4/XFS/HFS+ images made by each filesystem's own `mkfs`, read back
 and hashed, mounted as drives, and the image/restore/move/rebuild/undelete/carve
 stages on throwaway disks. A check that stops passing fails the build.
@@ -32,8 +32,8 @@ Proven on real hardware or VMs:
   Purge.
 - **HFS+ and HFSX volumes made by macOS**, every file matching macOS's own `md5`.
 
-Not yet: NVMe erase, the system disk of a physical machine end to end,
-BitLocker (images as ciphertext), and `verify`. What's next is in
+Not yet: NVMe erase, the system disk of a physical machine end to end, and
+BitLocker (images as ciphertext). What's next is in
 [ROADMAP.md](ROADMAP.md); what changed is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Screenshots
@@ -96,6 +96,7 @@ Needs Windows 10 or 11, 64-bit. Nothing else, except
 bulkhead image <VOL|diskN> <OUT.vhdx> [--from <PARENT.vhdx>] [--no-snapshot]
 bulkhead mount <IMAGE.vhdx> [--rw]
 bulkhead unmount <IMAGE.vhdx>
+bulkhead verify <IMAGE.vhdx>
 bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
 bulkhead part list <diskN>
 bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
@@ -117,6 +118,9 @@ bulkhead gui
 # image the system volume live, then an incremental on top of it
 bulkhead image C: D:\backups\c-full.vhdx
 bulkhead image C: D:\backups\c-mon.vhdx --from D:\backups\c-full.vhdx
+
+# will it restore? reads every byte, checks the chain and the filesystems
+bulkhead verify D:\backups\c-mon.vhdx
 
 # bootable recovery media (needs the Windows ADK and its WinPE add-on)
 bulkhead media D:\bulkhead-recovery.iso

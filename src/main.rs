@@ -17,6 +17,11 @@ bulkhead -- block-level backup and recovery for Windows
 
   bulkhead unmount <IMAGE.vhdx>
 
+  bulkhead verify <IMAGE.vhdx>
+      Check an image will restore: it opens with its whole incremental
+      chain, every byte reads, and every partition's filesystem walks.
+      Prints a SHA-256 of the image to compare against later.
+
   bulkhead restore <IMAGE.vhdx> <diskN> [--yes]
       ERASE a disk and write the image back over it. Asks first.
       A bigger target keeps its extra space: the GPT is extended to fit.
@@ -115,6 +120,7 @@ fn main() {
         ["image", vol, out] => cmd_image(vol, out, !flag("--no-snapshot"), opt("--from")),
         ["mount", img] => cmd_mount(img, flag("--rw")),
         ["unmount", img] => cmd_unmount(img),
+        ["verify", img] => cmd_verify(img),
         ["restore", img, target] => cmd_restore(img, target, flag("--yes")),
         ["media", iso] => media::build(iso, opt("--drivers")),
         ["gui"] => gui::run_gui(),

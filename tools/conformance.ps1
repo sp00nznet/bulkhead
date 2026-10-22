@@ -110,10 +110,13 @@ if (-not $NoSmoke) {
     $stages = @(
         'volume image round-trips'
         'whole-disk image round-trips'
+        'verify checks images and refuses a broken chain'
         'restore to a larger disk, GPT relocated'
         'partition moved, filesystem intact'
         'lost partition table rebuilt from filesystem headers'
+        'undelete refuses to write onto its source'
         'deleted file recovered byte-for-byte'
+        'imaging left the deleted file recoverable'
         'file carved from raw bytes by signature'
     )
     $log = Join-Path $env:TEMP 'bulkhead-smoke.log'
