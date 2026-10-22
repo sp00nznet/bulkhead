@@ -124,6 +124,11 @@ if (-not $NoSmoke) {
         if ($smoke -match [regex]::Escape("PASS  $s")) { Record "smoke: $s" PASS }
         else { Record "smoke: $s" FAIL "see $log" }
     }
+    # On a CI runner the log dies with the machine, so show where it stopped.
+    if ($smoke -notmatch 'ALL STAGES PASSED') {
+        Write-Host "--- end of smoke.ps1 output ---"
+        Get-Content $log -Tail 40 | Write-Host
+    }
 }
 
 $pass = @($results.Values | Where-Object { $_ -eq 'PASS' }).Count
