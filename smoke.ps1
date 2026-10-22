@@ -399,6 +399,13 @@ try {
     Write-Host "`nPASS  file carved from raw bytes by signature" -ForegroundColor Green
     Write-Host "`nALL STAGES PASSED" -ForegroundColor Green
 }
+catch {
+    # Print it ourselves: run under conformance.ps1, a thrown error otherwise
+    # never reaches the log, and the run just stops.
+    Write-Host "ERROR  $_"
+    Write-Host $_.ScriptStackTrace
+    throw
+}
 finally {
     Detach-All
 }
