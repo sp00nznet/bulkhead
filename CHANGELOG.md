@@ -11,6 +11,9 @@ binary could not load in WinPE, the GUI was missing from it, and a disk restored
 from it did not boot. All three are fixed below.
 
 ### Added
+- `verify`: attaches an image read-only (so a broken incremental chain fails
+  here, not on the day you restore), reads every byte, prints a SHA-256, and
+  opens every partition's filesystem.
 - `media` injects this machine's storage and network drivers into the WinPE
   image, so the recovery media can see the disks on the machine it was built
   for (b60b441).
@@ -32,6 +35,13 @@ from it did not boot. All three are fixed below.
   and ext3 are no longer listed as readable: they are refused, with a reason.
 
 ### Fixed
+- **Imaging could destroy deleted files.** `image` took a VSS snapshot of
+  every volume; VSS writes its change log onto that volume and NTFS reuses
+  deleted files' MFT records for it, so `undelete` afterwards found nothing, in
+  the source or the image. `image` now locks a volume nothing has open and
+  reads it directly, and uses VSS only for a volume in use, with a warning.
+- **`undelete` and `carve` wrote onto the volume they were recovering from**,
+  overwriting the free space being read. They, and `image`, now refuse.
 - The recovery binary died in WinPE's loader with `0xC0000135` before printing
   anything: it is now built with a static CRT and loads `comctl32.dll` lazily
   (cb5e34e).

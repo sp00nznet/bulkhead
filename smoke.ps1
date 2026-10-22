@@ -23,6 +23,14 @@ try { cargo build; if ($LASTEXITCODE -ne 0) { throw "cargo build failed" } }
 finally { Pop-Location }
 if (-not (Test-Path $exe)) { throw "missing $exe" }
 
+# Run bulkhead and capture everything it printed. Stop (above) would turn its
+# stderr into a terminating error under 2>&1 in Windows PowerShell, so the
+# preference is relaxed here; callers check $LASTEXITCODE instead.
+function Capture-Bulkhead {
+    $ErrorActionPreference = 'Continue'
+    & $exe @args 2>&1 | Out-String
+}
+
 function Invoke-Diskpart($lines, [switch]$Quiet) {
     $f = Join-Path $env:TEMP 'bulkhead-dp.txt'
     Set-Content $f (($lines + 'exit') -join "`r`n") -Encoding ascii
@@ -122,6 +130,26 @@ try {
     Write-Host "`nPASS  whole-disk image round-trips" -ForegroundColor Green
     Write-Host ("      disk image {0:N1} MB (source disk 512 MB)" -f `
         ((Get-Item $dsk).Length / 1MB))
+
+    # --- verify ------------------------------------------------------------
+    # Every image so far must verify, and an incremental whose parent is gone
+    # must not: that is the chain break verify exists to catch.
+    foreach ($v in @($img, $inc, $dsk)) {
+        $vout = Capture-Bulkhead verify $v
+        Write-Host $vout
+        if ($LASTEXITCODE -ne 0 -or $vout -notmatch 'verified') { throw "FAIL  verify $v`n$vout" }
+        if ($vout -notmatch 'NTFS, \d+ MFT records') { throw "FAIL  verify did not walk the NTFS volume in $v`n$vout" }
+    }
+    $orphanParent = Join-Path $work 'orphan-parent.vhdx'
+    $orphan = Join-Path $work 'orphan.vhdx'
+    Copy-Item $img $orphanParent -Force
+    Invoke-Diskpart @("create vdisk file=`"$orphan`" parent=`"$orphanParent`"")
+    Remove-Item $orphanParent -Force
+    Capture-Bulkhead verify $orphan | Out-Null
+    $orphanRc = $LASTEXITCODE
+    Remove-Item $orphan -Force -ErrorAction SilentlyContinue
+    if ($orphanRc -eq 0) { throw "FAIL  verify passed an incremental whose parent is missing" }
+    Write-Host "`nPASS  verify checks images and refuses a broken chain" -ForegroundColor Green
 
     # --- restore ----------------------------------------------------------
     # Onto a 1 GB target, so the GPT has to be relocated: a verbatim copy would
@@ -309,6 +337,23 @@ try {
     Write-VolumeCache -DriveLetter $rec.DriveLetter
     Start-Sleep -Seconds 2
 
+    # Output onto the volume being recovered would land in the free space
+    # being read. It has to be refused, not done.
+    Capture-Bulkhead undelete $vol --to "$vol\rescued" | Out-Null
+    if ($LASTEXITCODE -eq 0 -or (Test-Path "$vol\rescued")) { throw "FAIL  undelete wrote onto its own source" }
+    Write-Host "`nPASS  undelete refuses to write onto its source" -ForegroundColor Green
+
+    # Image the volume between the delete and the undelete. A VSS snapshot
+    # writes its diff area onto the volume and reuses the deleted file's MFT
+    # record; nothing has this volume open, so image must lock it instead and
+    # leave the record alone. The undelete below proves it did.
+    $afterDel = Join-Path $work 'after-delete.vhdx'
+    Remove-Item $afterDel -ErrorAction SilentlyContinue
+    $imgOut = Capture-Bulkhead image $vol $afterDel
+    if ($LASTEXITCODE -ne 0) { throw "image before undelete failed:`n$imgOut" }
+    if ($imgOut -notmatch 'locked') { throw "FAIL  an idle volume was snapshotted, not locked:`n$imgOut" }
+    Remove-Item $afterDel -ErrorAction SilentlyContinue
+
     $recovered = Join-Path $work 'recovered'
     Write-Host "`n[*] bulkhead undelete $vol --to $recovered"
     & $exe undelete $vol --to $recovered
@@ -344,6 +389,7 @@ try {
     }
 
     Write-Host "`nPASS  deleted file recovered byte-for-byte" -ForegroundColor Green
+    Write-Host "`nPASS  imaging left the deleted file recoverable" -ForegroundColor Green
 
     # --- carving -----------------------------------------------------------
     # A synthetic JPEG: real magic, real footer, and a payload that cannot
@@ -380,6 +426,13 @@ try {
 
     Write-Host "`nPASS  file carved from raw bytes by signature" -ForegroundColor Green
     Write-Host "`nALL STAGES PASSED" -ForegroundColor Green
+}
+catch {
+    # Print it ourselves: run under conformance.ps1, a thrown error otherwise
+    # never reaches the log, and the run just stops.
+    Write-Host "ERROR  $_"
+    Write-Host $_.ScriptStackTrace
+    throw
 }
 finally {
     Detach-All
