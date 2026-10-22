@@ -23,7 +23,25 @@ jobs:
           tool: cargo-audit
       - run: cargo audit
 
+  # The conformance corpus: real ext2/ext4/XFS/HFS+ images made and filled by
+  # each filesystem's own mkfs and the kernel, with a manifest of their hashes.
+  # Built fresh every run, so no image is ever committed.
+  corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xfsprogs hfsprogs
+          sudo modprobe hfsplus || echo "no hfsplus module; HFS+ will report SKIP"
+          sudo sh tools/corpus.sh corpus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corpus
+          path: corpus/
+
   windows:
+    needs: corpus
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -42,11 +60,19 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked
 
-      # smoke.ps1 and fs-smoke.ps1 are deliberately not here: they want an elevated
-      # prompt, real disks to create and destroy, and WSL with mkfs. What CI can prove is
-      # that it compiles, that the parsers still agree with their unit tests, and that
-      # both binaries come out. The hardware claims are proven at a bench and written
-      # down in the README, not asserted by a green tick.
+      # The conformance harness (REPO_RULES 9): the corpus read back and hashed,
+      # mount-fs through WinFsp, and smoke.ps1's image/restore/move/rebuild/undelete/
+      # carve stages on throwaway VHDX disks, which the runner's admin token allows.
+      # Fails on any check in tools/conformance-baseline.txt that stops passing.
+      # Real hardware (SANITIZE, a physical system disk) is still proven at a bench.
+      - uses: actions/download-artifact@v4
+        with:
+          name: corpus
+          path: corpus
+      - run: choco install winfsp -y --no-progress
+      - run: tools\conformance.ps1 -Corpus corpus
+        shell: powershell
+
       - uses: actions/upload-artifact@v4
         with:
           name: bulkhead-windows-x64
