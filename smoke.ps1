@@ -138,6 +138,9 @@ try {
 
     & $exe restore $dsk "disk$tgtDisk" --yes
     if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+    # restore leaves the disk offline so Windows can't reissue its partition
+    # GUIDs (1c98b1c). Bring it online, as restore tells the user to.
+    Set-Disk -Number $tgtDisk -IsOffline $false
     Start-Sleep -Seconds 3
 
     $rp = Get-Partition -DiskNumber $tgtDisk | Where-Object DriveLetter | Select-Object -First 1

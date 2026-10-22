@@ -1,0 +1,22 @@
+# Checks that passed when last recorded. tools/conformance.ps1 fails the run if
+# any of these stops passing. Add a line when a new check starts passing.
+ext2 refused
+ext4 ls
+ext4 cp
+ext4 carve opens image
+ext4 mount-fs
+xfs ls
+xfs cp
+xfs carve opens image
+xfs mount-fs
+hfs ls
+hfs cp
+hfs carve opens image
+hfs mount-fs
+smoke: volume image round-trips
+smoke: whole-disk image round-trips
+smoke: restore to a larger disk, GPT relocated
+smoke: partition moved, filesystem intact
+smoke: lost partition table rebuilt from filesystem headers
+smoke: deleted file recovered byte-for-byte
+smoke: file carved from raw bytes by signature

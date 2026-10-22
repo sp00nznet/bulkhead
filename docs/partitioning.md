@@ -29,9 +29,12 @@ part that is not:
 
 | Operation | Who does it |
 |---|---|
-| Shrink / extend a volume | Windows: `Resize-Partition`, Disk Management |
-| MBR→GPT on the *system* disk | Windows: `mbr2gpt.exe`, since 1703 |
-| **Move a partition** | **Nobody, at any price. This.** |
+| Shrink / extend an NTFS volume | Windows: `Resize-Partition`, Disk Management. Not ext4 or XFS, and a shrink stops at unmovable files |
+| MBR→GPT on the *system* disk | Windows: `mbr2gpt.exe`, since 1703. Not data or Linux disks |
+| **Move a partition** | Not Windows. GParted does it from a Linux boot. **bulkhead does it from Windows or its own recovery media** |
+
+The gaps in the first two rows (ext4 and XFS, non-system MBR disks) are on the
+[roadmap](../ROADMAP.md).
 
 Moving is also the missing half of the operation people actually hit: Windows
 will not extend a partition into free space that sits to its *left*. Slide the

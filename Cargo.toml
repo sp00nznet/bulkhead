@@ -2,7 +2,7 @@
 name = "bulkhead"
 version = "0.1.0"
 edition = "2024"
-description = "Block-level backup, partition and data recovery, and certified secure erase for Windows. No licence, no nagware, no proprietary image format."
+description = "Disk imaging to VHDX, partition and data recovery, ext4/XFS/HFS+ reading, and drive erase with a certificate, for Windows."
 repository = "https://github.com/sp00nznet/bulkhead"
 license = "MIT"
 readme = "README.md"

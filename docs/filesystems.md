@@ -1,4 +1,4 @@
-# Reading ext2/3/4, XFS and HFS+
+# Reading ext4, XFS and HFS+
 
 ```powershell
 bulkhead ls disk2 --at 1MB              # what is on the Linux partition
@@ -45,8 +45,12 @@ create, including opening an existing file for reading. Both answer
 This needs **WinFsp** (`winget install WinFsp.WinFsp`), the only dependency
 here that does not ship with Windows. It is loaded at runtime rather than
 linked, so every other command works without it and building bulkhead needs no
-SDK. WinFsp is GPLv3 with an exception for free software, which bulkhead's MIT
-licence falls under; a proprietary fork would need a licence from its authors.
+SDK.
+
+WinFsp is GPLv3 with an exception for free and open-source software. bulkhead
+meets it by being MIT, by not shipping WinFsp with anything proprietary, and by
+carrying its notice: **WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos** (https://github.com/winfsp/winfsp). A proprietary fork would need a
+licence from WinFsp's author.
 
 ## Verified against the real thing
 
@@ -63,7 +67,14 @@ counts.
 | XFS | **pass** — same three |
 | XFS via a mounted drive | **pass** |
 | ext2 | **refused correctly** — no extents, so it declines rather than guessing |
-| F2FS, HFS+ | skipped: the WSL kernel cannot mount them, so no image can be filled |
+| HFS+, and via a mounted drive | **pass** in CI, where Ubuntu's kernel can fill the image; skipped under WSL, whose kernel can't |
+| HFS+ and HFSX, made by macOS | **pass** — `hdiutil create -fs HFS+` on a real Mac, six files matching macOS's own `md5` (2026-08-31, by hand) |
+
+CI runs all of this on every push: `tools/corpus.sh` builds the images on a
+Linux runner, `tools/conformance.ps1` checks them on Windows, and a check that
+used to pass and stops passing fails the build. `fs-smoke.ps1` runs the same
+two pieces locally through WSL. All three filesystems pass through a drive
+letter too (`mount-fs`), in CI.
 
 It found a real bug. XFS listed directories and reported correct file sizes but
 returned every file **empty** — the `NREXT64` feature, on by default in current

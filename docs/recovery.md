@@ -135,7 +135,7 @@ bulkhead carve disk2 --to C:\carved
 When the MFT is gone there are no names, no sizes and no maps — only bytes.
 Most formats announce themselves with a magic number and many mark their own
 end, so a file can be lifted out whole without knowing anything about the
-filesystem that held it. Fourteen signatures: JPEG, PNG, GIF, PDF, zip (which
+filesystem that held it. Fourteen signatures (GIF has two) covering JPEG, PNG, GIF, PDF, zip (which
 covers Office and OpenDocument), MP4, SQLite, 7z, RAR, MP3, Ogg, gzip, bzip2.
 
 Two things it cannot do. Carved files have **no names** — only the offset they

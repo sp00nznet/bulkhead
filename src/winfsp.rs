@@ -4,9 +4,12 @@
 //! still works on a machine that does not have it -- and building bulkhead
 //! needs no SDK. Only this one command requires the driver.
 //!
-//! WinFsp itself is GPLv3 with an exception for free software; bulkhead is
-//! MIT, which that exception covers. A proprietary fork would need a licence
-//! from its authors.
+//! WinFsp itself is GPLv3 with an exception for free software. The exception
+//! needs an open-source licence (MIT is), no bundling with proprietary software,
+//! and its notice in the user interface and user-facing docs:
+//! "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos" and https://github.com/winfsp/winfsp.
+//! That line is in `bulkhead`'s help for mount-fs, the README and
+//! docs/filesystems.md. A proprietary fork would need a licence from its author.
 // Every function below is an FFI callback whose whole body works on raw
 // pointers handed over by the driver. Marking each operation individually adds
 // noise without adding information.

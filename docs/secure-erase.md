@@ -4,14 +4,16 @@
 bulkhead erase-info disk3
 ```
 
-Blancco and KillDisk charge per drive for one command the drive already
-implements, plus a piece of paper. The command is the easy part. The parts
-worth building are knowing *which* command a given drive will accept, and
-producing a record afterwards that means something — so that comes first, and
+Commercial erase tools (Blancco is sold per drive) mostly send a command the
+drive already implements and print a report. The command is the easy part.
+The parts worth building are knowing *which* command a given drive will accept,
+and producing a record afterwards that means something. That comes first, and
 it is read-only.
 
 It reports the drive's identity and every erase path it offers: ATA security
-erase, ATA sanitize (crypto/block/overwrite), NVMe format, NVMe sanitize. More
+erase, ATA sanitize (crypto/block/overwrite), NVMe format, NVMe sanitize. The
+ATA paths have been run on real drives. The NVMe paths have not: NVMe Identify
+fails with `ERROR_INVALID_FUNCTION` on the drives tested so far. More
 usefully it says what is **stopping** one:
 
 - **FROZEN** — nearly every desktop firmware freezes the ATA security state at

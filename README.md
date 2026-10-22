@@ -1,30 +1,50 @@
 # bulkhead
 
-Free, open block-level backup and recovery for Windows.
+A free, MIT-licensed disk tool for Windows. It images disks to plain VHDX and
+restores them, rebuilds lost partition tables, recovers deleted NTFS files,
+reads ext4, XFS and HFS+ volumes that Windows can't, and erases drives with a
+certificate of erasure. It comes as a command-line exe and a native window,
+and it builds its own bootable WinPE recovery ISO.
 
-Macrium killed Reflect Free. Acronis went subscription. EaseUS, AOMEI and
-MiniTool ship nagware that makes the backup for free and paywalls the restore.
-Paragon charges ~$40 per filesystem to read ext4 on Windows. Blancco charges
-per drive for one ATA command and a PDF.
+## Status
 
-None of this is hard science, and most of it already ships **inside Windows**:
-VSS, VHDX differencing disks, `AttachVirtualDisk`, the ATA and NVMe sanitize
-commands. What the paid tools sell is the integration. bulkhead is that
-integration, given away.
+**v0.1.0, alpha.** Every command has been run against real disks or VMs, but
+not every path has been run on every kind of hardware. `restore`,
+`erase`, `part move` and `scan --rebuild` write to disks and can't be undone:
+read what they print before saying yes.
 
-Sister project to [futureburn](https://github.com/sp00nznet/futureburn),
-[pstfree](https://github.com/sp00nznet/pstfree) and
-[vncfree](https://github.com/sp00nznet/vncfree) — same attitude: find the
-Windows payware, read the published spec it is hiding behind, give it away.
-[Why](PHILOSOPHY.md).
+**Conformance: 20 of 20 checks pass** in CI on every push (`tools/conformance.ps1`):
+real ext2/ext4/XFS/HFS+ images made by each filesystem's own `mkfs`, read back
+and hashed, mounted as drives, and the image/restore/move/rebuild/undelete/carve
+stages on throwaway disks. A check that stops passing fails the build.
 
-Reading a Linux root filesystem that Windows will not mount — the thing
-Paragon charges ~$40 for — with sizes and counts taken from the filesystem
-itself, all the way down:
+Proven on real hardware or VMs:
+
+- **Undelete at scale.** After an `rm -rf` on an 18 TB NTFS volume, 815,472
+  files (432.6 GB) came back into their directory tree, including 238 git
+  repositories with 2 corrupt objects among them ([details](docs/recovery.md#what-this-has-been-run-against)).
+- **Image, wipe, rebuild, restore.** A 238 GB laptop drive with 8 partitions was
+  imaged and wiped; `scan --rebuild` found 7 of the 8 at their exact offsets
+  (the 8th, Microsoft Reserved, holds no filesystem to find).
+- **Restore to bare metal**, from the recovery media, in a VM: a restored
+  Debian disk booted to a login prompt.
+- **ATA SANITIZE purge** on a 512 GB SATA SSD, with a certificate that reads
+  Purge.
+- **HFS+ and HFSX volumes made by macOS**, every file matching macOS's own `md5`.
+
+Not yet: NVMe erase, the system disk of a physical machine end to end,
+BitLocker (images as ciphertext), and `verify`. What's next is in
+[ROADMAP.md](ROADMAP.md); what changed is in [CHANGELOG.md](CHANGELOG.md).
+
+## Screenshots
+
+![The bulkhead window](docs/gui-main.png)
+
+Reading a Linux root filesystem that Windows won't mount:
 
 ```
 > bulkhead ls debian-root.img
-[*] debian-root.img at 0 B: ext2/3/4, 2.9 GB
+[*] debian-root.img at 0 B: ext4, 2.9 GB
        38.6 MB  boot/  615 files
         1.5 MB  etc/  932 files
          732 B  root/  2 files
@@ -35,73 +55,40 @@ itself, all the way down:
 [*] 20 entries here, 23560 files in all, 620.6 MB
 ```
 
-`find | wc -l` on the same filesystem, mounted on the machine it came from,
-says 23560. `cp` pulls any of it out; `mount-fs` gives it a drive letter.
+`find | wc -l` on the machine the filesystem came from says 23560 too.
 
-And the same engine with a window on it, for the machine that is already
-broken and the person who does not want a command line:
+## Getting Started
 
-![The bulkhead window](docs/gui-main.png)
+### Quick start
 
-> ⚠️ **Pre-alpha.** Every command has been run against real hardware or a
-> real filesystem, including a full image → restore → boot cycle from the
-> recovery media and an ATA SANITIZE purge with a certificate. What is still
-> untested: the system disk of a *physical* machine, and BitLocker volumes,
-> which image as ciphertext. `restore`, `erase` and `part move` write to disks
-> and cannot be undone — read what they print before saying yes.
+1. Download `bulkhead-gui.exe` and `bulkhead.exe` from the
+   [latest release](https://github.com/sp00nznet/bulkhead/releases/latest)
+   into **the same folder**. The window runs `bulkhead.exe` for every
+   operation, so it needs it next to it.
+2. Right-click `bulkhead-gui.exe` and choose **Run as administrator**. Reading
+   disks directly needs it.
+3. The window lists your disks. Pick one and press the button for the job.
 
-## Why VHDX
+There's nothing to install. Windows SmartScreen may warn about an unsigned
+download: **More info**, then **Run anyway**.
 
-The format choice carries most of the feature list, so it's worth being explicit:
+### Step by step (command line)
 
-| What the paid tools charge for | What bulkhead does |
-|---|---|
-| Block-level snapshot of a live volume | `Win32_ShadowCopy` → read the shadow device raw |
-| Whole-disk image that boots | GPT copied verbatim; VHDX sized to match the source |
-| Incremental chains | VHDX **differencing disks** — Windows tracks the blocks |
-| Mount-image-as-a-drive | `AttachVirtualDisk` — it shows up in Explorer |
-| Bootable recovery media | WinPE (ADK) + a `startnet.cmd` |
-| Restore to bare metal | Copy the partition back; WinPE boots the VHDX directly |
+Needs Windows 10 or 11, 64-bit. Nothing else, except
+[WinFsp](https://winfsp.dev/) for `mount-fs` and the
+[Windows ADK](https://aka.ms/adk) for `media`.
 
-A proprietary image format is how you get locked in. A VHDX opens in Explorer,
-in Hyper-V, in `Mount-DiskImage`, and in every other tool on the platform — with
-or without bulkhead installed.
-
-## A library, and who runs it
-
-This repo is a library with the desktop program on top of it. The split that
-matters is **who runs the thing**: bulkhead is the desktop build, for a person
-at a broken machine with one disk in front of them. GUI, recovery media,
-undelete, carve, erase. No service, no scheduler, nothing that wants a
-credential.
-
-Unattended and scheduled work — service accounts, credential stores, running
-across many machines — is deliberately not here. It belongs to a separate
-program built on this same library, and the separation is the point: a
-scheduler dependency that creeps into a desktop tool does not announce itself.
-
-The filesystem readers live in the library rather than in the program, because
-"get three files off this Linux disk" is a desktop job that file-level restore
-also needs.
-
-## Install
-
-Needs Rust and an **elevated** prompt (raw volume access).
-
-```
-cargo build --release
-```
-
-That produces two executables, and the Releases page carries the same two:
-
-| | |
-|---|---|
-| `bulkhead.exe` | the command line. Everything below. |
-| `bulkhead-gui.exe` | [the window](docs/gui.md), on its own. |
-
-They are the same engine: the window shells out to `bulkhead.exe` sitting
-next to it for every operation, so it can get the arguments wrong but never
-the disk. `bulkhead gui` opens the same window from the command line.
+1. Download `bulkhead.exe` from the
+   [latest release](https://github.com/sp00nznet/bulkhead/releases/latest).
+2. Open **Terminal (Admin)** or an elevated PowerShell in that folder. Without
+   elevation, commands that open a disk or volume fail with
+   `Access is denied`. Reading an image file doesn't need it.
+3. See what's attached, without changing anything:
+   ```
+   .\bulkhead.exe identify disk0
+   ```
+   It prints the partition table and what's on each partition.
+4. Run `.\bulkhead.exe` with no arguments for every command and its options.
 
 ## Usage
 
@@ -114,180 +101,112 @@ bulkhead part list <diskN>
 bulkhead part move <diskN> <N> --to <OFFSET> [--yes]
 bulkhead scan <diskN> [--rebuild] [--yes]
 bulkhead undo <diskN> <TABLE.bin> [--yes]
-bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>]
+bulkhead undelete <VOL|diskN> --to <DIR> [--at <OFFSET>] [--limit <N>] [--flat]
 bulkhead carve <VOL|diskN> --to <DIR> [--limit <N>]
 bulkhead identify <VOL|diskN> [--at <OFFSET>]
+bulkhead ls <VOL|diskN|IMAGE> [PATH] [--at <OFFSET>]
+bulkhead cp <VOL|diskN|IMAGE> <PATH> --to <DIR> [--at <OFFSET>]
+bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
 bulkhead erase-info <diskN>
 bulkhead erase <diskN> [--method <M>] [--yes] [--cert <FILE>]
-bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
-bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
-bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
-bulkhead gui
 bulkhead media <OUT.iso>
+bulkhead gui
 ```
 
 ```powershell
-# full image of the system volume, taken live via VSS
+# image the system volume live, then an incremental on top of it
 bulkhead image C: D:\backups\c-full.vhdx
-
-# incremental: a differencing disk that only stores what changed
 bulkhead image C: D:\backups\c-mon.vhdx --from D:\backups\c-full.vhdx
 
-# browse it. read-only by default; it appears as a drive in Explorer
-bulkhead mount D:\backups\c-mon.vhdx
-bulkhead unmount D:\backups\c-mon.vhdx
-```
-
-`--no-snapshot` reads the volume directly instead of through VSS. Only for
-volumes nothing is writing to — an offline disk, or a drive you just plugged in.
-
-### Recovery media
-
-```powershell
+# bootable recovery media (needs the Windows ADK and its WinPE add-on)
 bulkhead media D:\bulkhead-recovery.iso
+
+# a partition table got wiped: find the filesystems, then write a new table
+bulkhead scan disk2
+bulkhead scan disk2 --rebuild
+
+# get deleted files back off an NTFS volume, into their original folders
+bulkhead undelete E: --to D:\recovered
+
+# copy files off a Linux disk. identify says where its partition starts
+bulkhead identify disk3
+bulkhead ls disk3 --at 1MB /home/me
+bulkhead cp disk3 /home/me/photos --to D:\photos --at 1MB
+
+# what can this drive do to erase itself, then do it, with a certificate
+bulkhead erase-info disk4
+bulkhead erase disk4 --cert D:\erase-disk4.html
 ```
 
-Builds bootable WinPE with bulkhead in it. Needs the **Windows ADK** and its
-**WinPE add-on** — two separate downloads from <https://aka.ms/adk>, because
-WinPE stopped shipping inside the ADK at 1809.
-
-WinPE has no PowerShell in its base image, and bulkhead partitions its target
-with the Storage cmdlets, so the media adds `WinPE-WMI`, `WinPE-NetFX`,
-`WinPE-Scripting`, `WinPE-PowerShell` and `WinPE-StorageWMI`. That is most of
-the build time and most of the ISO size.
-
-VSS does not exist in WinPE either, so imaging from the media is always
-`--no-snapshot`. That costs nothing: nothing in WinPE is writing to the disk
-you are imaging.
-
-Takes a few minutes, almost all of it DISM, and produces a ~534 MB ISO. For a
-USB stick instead of an ISO, the workspace is left in place:
-
-```powershell
-MakeWinPEMedia /UFD "$env:TEMP\bulkhead-winpe" F:
-```
-
-## Status
-
-`smoke.ps1` builds a throwaway 512 MB NTFS volume, images it, takes an
-incremental, mounts the image back and compares a file hash across both. Run it
-elevated.
-
-Measured on that volume -- 496 MB with 106 MB in use, one small file added
-between the two images:
-
-| | before used-clusters-only | after |
-|---|---|---|
-| full image | 256 MB | **38 MB** |
-| incremental | 255 MB | **35 MB** |
-| reported as changed | 18.2 MB | **2.6 MB** |
-| whole-disk image | - | **36 MB** (512 MB disk) |
-
-`restore` puts that 512 MB image onto a 1 GB disk and relocates the GPT, so all
-512 MB of the extra space comes back as usable free space rather than being
-stranded behind a partition table describing the old disk.
-
-- [x] `image <VOL>` — VSS snapshot → dynamic VHDX, GPT + one partition
-- [x] `image diskN` — whole disk: verbatim GPT, per-partition VSS, raw gaps.
-      Same size as the source, so it attaches and boots directly
-- [x] `image --from` — differencing disk, unchanged blocks left unallocated
-- [x] `mount` / `unmount` — `AttachVirtualDisk`, read-only by default
-- [x] **used-clusters only** (`FSCTL_GET_VOLUME_BITMAP`) — free space is never
-      read and never written
-- [x] `restore` — erase a disk and write an image back, GPT relocated if the
-      target is bigger. Refuses the disk hosting the running system
-- [x] `scan` / `scan --rebuild` — find filesystems whose partition table is
-      gone and write a new GPT pointing at them
-- [x] `undelete` — recover deleted files from NTFS, resident and non-resident,
-      into their original directory tree. Run against a real 18 TB volume
-      after `rm -rf` removed ~48 project trees: **815,472 files / 432.6 GB**
-      recovered, 238 git repositories, two corrupt objects in the lot. See
-      [Data recovery](docs/recovery.md#what-this-has-been-run-against)
-- [x] `undo` — put back a table saved by `scan --rebuild`
-- [x] `carve` — signature-based recovery when no filesystem survives
-- [ ] verify (hash the image against the source)
-- [ ] chain merge — collapse a differencing chain back into one image
-- [x] WinPE recovery media (`bulkhead media`) — ISO; `/UFD` for USB
-- [x] GUI (`bulkhead gui`) — native Win32, no toolkit, runs in WinPE;
-      progress bar, cancel, and `erase`/`restore` behind the engine's own prompts
-- [x] `ls` / `cp` — read ext2/3/4, XFS and HFS+ volumes Windows cannot mount
-- [x] `identify` — RAID/LVM/ZFS/btrfs/bcachefs membership and format recognition
-- [x] `mount-fs` — ext4/XFS/HFS+ as a read-only Windows drive, via WinFsp
-- [x] `erase-info` — what erase commands a drive supports, and what blocks them
-- [x] `erase --method overwrite` — zero every sector, then sample-verify
-- [x] `erase` via firmware sanitize — ATA SANITIZE block erase, run end to
-      end on a SATA SSD; the certificate reads Purge
-- [x] erase certificate (`--cert`) — JSON for a machine, a printable page for
-      a person, written whether it passed or failed
-- [ ] the certificate is unsigned: nothing ties the paper to the record
-- [ ] MBR disks are read by `part list` and `identify`, but `part move`
-      still writes GPT only
-- [x] the recovery ISO boots, and the whole cycle runs from it — `identify`,
-      `image`, `restore` and the GUI, verified in a booted WinPE VM
-- [ ] tested against the system disk of a *physical* machine. A VM's system
-      disk has been imaged, restored onto a bigger disk and booted back up
-- [ ] BitLocker volumes image as ciphertext, not plaintext
-
-## Roadmap
-
-The five things people currently pay for. Each one builds on the last:
-
-1. **Imaging + recovery media** — **done.** The Reflect Free replacement.
-   Outstanding: `verify` and chain merge. Scheduling and retention are not
-   on this list on purpose — see **A library, and who runs it** above.
-2. **Partition manager** — **done for GPT.** `part move` is the operation
-   nobody gives away; see [Partitioning](docs/partitioning.md) for what is
-   deliberately left to Windows.
-   MBR disks are now read rather than refused — `part list` and `identify`
-   follow the extended chain and report logical partitions. Outstanding:
-   nothing writes an MBR, so `part move` is still GPT-only.
-3. **Data recovery** — *in progress.* `scan` finds filesystems whose partition
-   table is gone and rebuilds it, which is TestDisk's headline feature.
-   **done.** `scan` rebuilds a lost partition table, `undelete` recovers files
-   from a surviving MFT, `carve` works from raw signatures when there is none,
-   and `bulkhead gui` fronts all of it.
-4. **Filesystem drivers** — *in progress.* `ls` and `cp` read ext2/3/4, XFS
-   and HFS+; `identify` recognises MD RAID, LVM2, ZFS, btrfs, bcachefs,
-   SquashFS, UFS2 and VMFS members. Outstanding: F2FS and UFS2 reading, APFS,
-   btrfs reading, and exposing them all as mountable volumes via WinFsp.
-5. **Certified secure erase** — *in progress.* `erase-info` reports what a
-   drive supports and what blocks it; `erase --method overwrite` wipes a drive
-   and verifies by sampling, confirmed on real hardware; `--cert` produces the
-   record afterwards. The ATA SANITIZE block-erase path has now been run end to
-   end on a SATA SSD, and its certificate reads Purge. Outstanding: crypto
-   scramble on a drive that offers it, the NVMe equivalents, and signing the
-   certificate.
-
-Linux and macOS are a stretch goal. Windows first, because that's where the
-gap is.
-
-
-## Documentation
-
-The README is the entry point; each capability has its own page.
+Each area has its own page:
 
 | | |
 |---|---|
-| [Partitioning](docs/partitioning.md) | `part list`, `part move`, and what is deliberately left to Windows |
+| [Imaging and recovery media](docs/imaging.md) | `image`, `mount`, `restore`, `media`, and the measured sizes |
+| [Partitioning](docs/partitioning.md) | `part list`, `part move`, and what's left to Windows |
 | [Data recovery](docs/recovery.md) | `scan` a lost partition table, `undelete` from NTFS, `carve` from raw bytes |
-| [Reading ext2/3/4, XFS and HFS+](docs/filesystems.md) | `ls`, `cp`, `mount-fs`, and how they are verified |
+| [Reading ext4, XFS and HFS+](docs/filesystems.md) | `ls`, `cp`, `mount-fs`, and how they're verified |
 | [What is this disk?](docs/identify.md) | `identify`: RAID, LVM, ZFS, btrfs and friends |
 | [Secure erase](docs/secure-erase.md) | `erase-info`, `erase`, and the certificate |
 | [The window](docs/gui.md) | `bulkhead gui` |
+| [Architecture](docs/architecture.md) | the parts, why the window is a separate process, why VHDX |
 | [Design notes](docs/design.md) | shortcuts taken, granularity numbers, known limits |
 
-## The sister projects
+### Compared with what's sold
 
-| | |
-|---|---|
-| [futureburn](https://github.com/sp00nznet/futureburn) | CD, DVD and Blu-ray burning, ripping and image mounting. |
-| [pstfree](https://github.com/sp00nznet/pstfree) | Read, export and repair Outlook PST/OST files without Outlook. |
-| [vncfree](https://github.com/sp00nznet/vncfree) | A VNC client and server with no subscription and no ad-gated download. |
+Checked 2026-10-22, from third-party listings where vendors don't publish prices.
 
-Same method every time: read the published spec, call the OS API that is
-already there, ship one executable, MIT. Why that is worth doing at all is
-written down in **[PHILOSOPHY.md](PHILOSOPHY.md)**.
+| Job | Paid option | bulkhead |
+|---|---|---|
+| Disk imaging | Macrium Reflect Free reached end of life in January 2024; Reflect X Home is about $45-50 a year per PC. Acronis True Image is subscription-only, from $49.99 a year. AOMEI Backupper Standard, MiniTool ShadowMaker Free and EaseUS Todo Free still image and restore for free, and charge for cloning, scheduling and media extras | Images and restores to VHDX, which opens without bulkhead. No scheduler: run it from Task Scheduler |
+| Linux filesystems on Windows | Paragon Linux File Systems for Windows, about $30. It also writes ext4 and reads btrfs, which bulkhead doesn't | Reads ext4, XFS and HFS+, and mounts them as a read-only drive letter |
+| Drive erasure with a report | Blancco Drive Eraser, sold per drive per year (about $7-18 a drive through resellers) | ATA SANITIZE and overwrite, with a certificate. NVMe isn't proven yet, and the certificate isn't signed |
+
+Sources: [gHacks](https://www.ghacks.net/?p=182006) on Reflect Free,
+[PCWorld](https://www.pcworld.com/article/3204158/macrium-reflect-x-home-review-2.html) on Reflect X,
+[Acronis](https://www.acronis.com/en-us/products/true-image/purchasing/),
+[Paragon](https://www.paragon-software.com/home/linuxfs-windows/) and
+[FileHorse](https://www.filehorse.com/download-linux-file-systems-for-windows/),
+[CDW](https://www.cdw.com/product/blancco-drive-eraser-enterprise-edition-subscription-license-1-year-1/8183818),
+[PCWorld](https://pcworld.com/article/2853116/aomei-backupper-standard-review.html) on AOMEI.
+
+## Building from source
+
+1. Install [Rust](https://rustup.rs/) (stable, 1.85 or newer for edition 2024)
+   with the MSVC toolchain, which needs the Visual Studio Build Tools' "Desktop
+   development with C++" workload.
+2. Build:
+   ```
+   git clone https://github.com/sp00nznet/bulkhead
+   cd bulkhead
+   cargo build --release
+   ```
+   Both executables land in `target\release\`.
+3. Check it, as CI does:
+   ```
+   cargo fmt --check
+   cargo clippy --locked --all-targets -- -D warnings
+   cargo test --locked
+   ```
+4. The conformance harness needs more than a build. `fs-smoke.ps1` needs WSL
+   with the `mkfs` tools. `smoke.ps1` needs an elevated prompt and creates and
+   destroys its own throwaway VHDX disks. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+`.cargo/config.toml` links the C runtime statically and loads `comctl32.dll`
+lazily. WinPE has neither DLL, and without these flags the recovery media's
+binary dies before printing anything.
+
+## Related
+
+The same idea as [futureburn](https://github.com/sp00nznet/futureburn) (disc
+burning and ripping), [pstfree](https://github.com/sp00nznet/pstfree) (Outlook
+PST/OST without Outlook) and [vncfree](https://github.com/sp00nznet/vncfree):
+read the published spec, call the OS API that's already there, ship one
+executable. Why that's worth doing is in [PHILOSOPHY.md](PHILOSOPHY.md).
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE). Security issues: [SECURITY.md](SECURITY.md).
+
+`mount-fs` uses WinFsp, loaded at runtime if it's installed: WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos,
+<https://github.com/winfsp/winfsp>.
