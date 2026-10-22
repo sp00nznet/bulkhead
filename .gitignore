@@ -4,3 +4,6 @@
 # every run, pass or fail, so keep them out of a repo that is going public.
 /docs/fikwot-purge.html
 /build-farm
+
+# A local screenshot, untracked on purpose (89bedeb).
+/docs/gui-done.png
