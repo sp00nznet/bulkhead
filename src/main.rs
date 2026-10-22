@@ -46,7 +46,7 @@ bulkhead -- block-level backup and recovery for Windows
 
   bulkhead ls <VOL|diskN> [PATH] [--at <OFFSET>]
   bulkhead cp <VOL|diskN> <PATH> --to <DIR> [--at <OFFSET>]
-      Read ext2/3/4, XFS and HFS+ volumes, which Windows cannot. PATH is inside the
+      Read ext4, XFS and HFS+ volumes, which Windows cannot. PATH is inside the
       filesystem; cp takes a file or a whole directory tree.
 
   bulkhead identify <VOL|diskN> [--at <OFFSET>]
@@ -54,7 +54,7 @@ bulkhead -- block-level backup and recovery for Windows
       or ZFS pool member, btrfs/bcachefs, SquashFS, UFS2, VMFS.
 
   bulkhead mount-fs <VOL|diskN|IMAGE> <X:> [--at <OFFSET>]
-      Mount an ext2/3/4, XFS or HFS+ volume as a Windows drive, read-only.
+      Mount an ext4, XFS or HFS+ volume as a Windows drive, read-only.
       Needs WinFsp (winget install WinFsp.WinFsp).
 
   bulkhead erase-info <diskN>

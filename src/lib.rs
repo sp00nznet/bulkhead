@@ -1310,7 +1310,7 @@ impl<'a> Fs<'a> {
         match hfs::Hfs::open(disk, base) {
             Ok(h) => Ok(Fs::Hfs(h)),
             Err(_) => Err(format!(
-                "no ext2/3/4, XFS or HFS+ volume at {}.
+                "no ext4, XFS or HFS+ volume at {}.
                      NTFS and FAT are readable by Windows itself; for those use                  Explorer, or `bulkhead undelete` for deleted files.",
                 human(base)
             ).into()),
@@ -1320,7 +1320,7 @@ impl<'a> Fs<'a> {
     fn describe(&self) -> String {
         match self {
             Fs::Ext(e) => format!(
-                "ext2/3/4, {}{}",
+                "ext4, {}{}",
                 human(e.blocks * e.block_size),
                 if e.label.is_empty() {
                     String::new()

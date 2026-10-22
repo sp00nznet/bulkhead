@@ -1,4 +1,4 @@
-# Reading ext2/3/4, XFS and HFS+
+# Reading ext4, XFS and HFS+
 
 ```powershell
 bulkhead ls disk2 --at 1MB              # what is on the Linux partition
@@ -63,7 +63,14 @@ counts.
 | XFS | **pass** — same three |
 | XFS via a mounted drive | **pass** |
 | ext2 | **refused correctly** — no extents, so it declines rather than guessing |
-| F2FS, HFS+ | skipped: the WSL kernel cannot mount them, so no image can be filled |
+| HFS+ | **pass** in CI, where Ubuntu's kernel can fill the image; skipped under WSL, whose kernel can't |
+| HFS+ and HFSX, made by macOS | **pass** — `hdiutil create -fs HFS+` on a real Mac, six files matching macOS's own `md5` (2026-08-31, by hand) |
+
+CI runs all of this on every push: `tools/corpus.sh` builds the images on a
+Linux runner, `tools/conformance.ps1` checks them on Windows, and a check that
+used to pass and stops passing fails the build. `fs-smoke.ps1` runs the same
+two pieces locally through WSL. `mount-fs` is proven on ext4 and XFS; HFS+
+through a drive letter has no check yet.
 
 It found a real bug. XFS listed directories and reported correct file sizes but
 returned every file **empty** — the `NREXT64` feature, on by default in current

@@ -22,6 +22,11 @@ filesystem at all.
 | **VMFS** | version and label |
 | **NTFS / exFAT / FAT** | named only — Windows reads these itself |
 
+How far it's proven: the RAID, volume-manager and other-format rows (MD RAID,
+LVM2, ZFS, btrfs, bcachefs, SquashFS, UFS2, VMFS) rest on unit tests built from
+their published on-disk layouts. None has been checked against a disk made by
+the real tools yet.
+
 It probes the whole device and then every partition on it, because a NAS disk
 carries its RAID metadata on the partition rather than the disk.
 

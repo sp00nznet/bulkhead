@@ -1,4 +1,4 @@
-//! Read ext2/3/4 volumes, which Windows cannot.
+//! Read ext4 volumes, which Windows cannot. ext2/ext3 (no extents) are refused, not guessed at.
 //!
 //! This is the filesystem Paragon charges per-seat to read. Nothing exotic is
 //! needed to get files off one: a superblock says how the volume is laid out,
