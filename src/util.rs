@@ -55,3 +55,57 @@ pub fn human(b: u64) -> String {
     }
     format!("{b} B")
 }
+
+/// SHA-256 through Windows' own CNG (bcrypt.dll), so no hashing crate.
+pub struct Sha256(windows::Win32::Security::Cryptography::BCRYPT_HASH_HANDLE);
+
+impl Sha256 {
+    pub fn new() -> Res<Sha256> {
+        use windows::Win32::Security::Cryptography::*;
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        let mut h = BCRYPT_HASH_HANDLE::default();
+        unsafe {
+            BCryptOpenAlgorithmProvider(
+                &mut alg,
+                BCRYPT_SHA256_ALGORITHM,
+                None,
+                BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+            )
+            .ok()
+            .ctx("BCryptOpenAlgorithmProvider")?;
+            BCryptCreateHash(alg, &mut h, None, None, 0)
+                .ok()
+                .ctx("BCryptCreateHash")?;
+        }
+        // ponytail: the algorithm handle is left open; one per hash, process
+        // lifetime. Close it if this ever hashes in a loop.
+        Ok(Sha256(h))
+    }
+
+    pub fn update(&mut self, data: &[u8]) -> Res<()> {
+        unsafe { windows::Win32::Security::Cryptography::BCryptHashData(self.0, data, 0) }
+            .ok()
+            .ctx("BCryptHashData")
+    }
+
+    pub fn hex(self) -> Res<String> {
+        let mut out = [0u8; 32];
+        unsafe { windows::Win32::Security::Cryptography::BCryptFinishHash(self.0, &mut out, 0) }
+            .ok()
+            .ctx("BCryptFinishHash")?;
+        Ok(out.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sha256_known_answer() {
+        let mut h = super::Sha256::new().unwrap();
+        h.update(b"abc").unwrap();
+        assert_eq!(
+            h.hex().unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}

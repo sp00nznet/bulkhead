@@ -2495,6 +2495,94 @@ pub fn cmd_unmount(path: &str) -> Res<()> {
     Ok(())
 }
 
+/// Check an image will restore: it opens (with its whole differencing chain),
+/// every byte reads, and every partition's filesystem is intact enough to walk.
+///
+/// The SHA-256 covers the whole virtual disk, so a later `verify` printing the
+/// same digest proves nothing has changed since. It is of the image, not the
+/// source: a live source has moved on since it was imaged, so comparing the
+/// two would fail for reasons that aren't faults.
+pub fn cmd_verify(path: &str) -> Res<()> {
+    let vhd = Vhd::open(path, false).ctx("open image (or a parent in its chain)")?;
+    vhd.attach(true, false, false)
+        .ctx("attach image (or a parent in its chain)")?;
+    let r = verify_attached(&vhd);
+    let _ = vhd.detach();
+    let bad = r?;
+    if bad > 0 {
+        return Err(format!("{path}: {bad} problem(s), see above").into());
+    }
+    eprintln!("[+] {path} verified: it reads end to end and every filesystem in it opens");
+    Ok(())
+}
+
+/// Returns the number of problems found; Err only when it couldn't check at all.
+fn verify_attached(vhd: &Vhd) -> Res<u64> {
+    let disk = Raw::open(&vhd.physical_path()?, false).ctx("open attached image")?;
+    let size = disk.len()?;
+    eprintln!("[*] reading all {} of the image", human(size));
+
+    let mut sha = util::Sha256::new()?;
+    let chunk = CHUNK as u64;
+    let mut buf = vec![0u8; CHUNK];
+    let mut done = 0u64;
+    disk.seek(0)?;
+    while done < size {
+        let want = (size - done).min(chunk) as usize;
+        let n = disk
+            .read(&mut buf[..want])
+            .map_err(|e| format!("unreadable at {}: {e}", human(done)))?;
+        if n == 0 {
+            return Err(format!("image ends early, at {} of {}", human(done), human(size)).into());
+        }
+        sha.update(&buf[..n])?;
+        done += n as u64;
+        eprint!(
+            "\r  {:3}%  {} / {}",
+            done * 100 / size,
+            human(done),
+            human(size)
+        );
+        let _ = std::io::stderr().flush();
+    }
+    eprintln!("\r  SHA-256 {}    ", sha.hex()?);
+
+    let layout = read_layout(&disk)?;
+    let mut bad = 0u64;
+    for p in &layout.parts {
+        let base = p.start_lba * layout.sector;
+        let len = (p.end_lba + 1 - p.start_lba) * layout.sector;
+        let what = format!("partition {} at {} ({})", p.number, human(base), human(len));
+        if let Ok(fs) = ntfs::Ntfs::open(&disk, base) {
+            // dirs() reads every MFT record, so a damaged MFT shows up here.
+            let d = fs.dirs(|_, _| {});
+            if d.is_empty() {
+                eprintln!("  [!] {what}: NTFS, but no directories could be read from its MFT");
+                bad += 1;
+            } else {
+                eprintln!(
+                    "  ok  {what}: NTFS, {} MFT records read, {} directories",
+                    fs.records(),
+                    d.len()
+                );
+            }
+        } else if let Ok(fs) = Fs::open(&disk, base) {
+            let (root, _) = fs.resolve("/")?;
+            let (files, bytes) = tally(&fs, root);
+            eprintln!(
+                "  ok  {what}: {}, {files} files ({}) walked",
+                fs.describe(),
+                human(bytes)
+            );
+        } else {
+            // Microsoft Reserved, BIOS boot, FAT and friends: nothing bulkhead
+            // checks, and not a fault.
+            eprintln!("  --  {what}: no NTFS, ext4, XFS or HFS+ here to check");
+        }
+    }
+    Ok(bad)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
