@@ -26,6 +26,24 @@ from it did not boot. All three are fixed below.
 - CHANGELOG, ROADMAP, CONTRIBUTING and SECURITY.
 
 ### Changed
+- **The window, after a usability pass** (QA, 2026-10-22):
+  - `bulkhead-gui.exe` asks for administrator rights when it starts, instead
+    of opening normally and failing every button with "Access is denied".
+    `bulkhead gui` from an unelevated prompt shows a Restart as administrator
+    button.
+  - The disk list shows bus, model, serial, the disk Windows is on, offline
+    disks, and the file behind a mounted image, and it refreshes after every
+    run. A line under the list says what the selected disk is and which buttons
+    work on it; buttons that don't fit the selection are greyed out, and
+    Restore, Erase and Rebuild table are off for the Windows disk.
+  - Confirmations name the disk by model, size, serial and volumes, not just
+    `disk2`.
+  - New buttons: Verify image, Rebuild table, Bring disk online, Open folder.
+    The log no longer tells you to type command-line commands.
+  - Every run ends Done, Failed or Cancelled, and it stays on screen.
+  - Tab moves between controls, paths are checked before anything starts,
+    Browse opens an image instead of offering to overwrite it, and the window
+    fits the screen and has a minimum size.
 - `undelete` puts recovered files back into their original directory tree
   instead of one flat folder (890edd8), and a re-run skips files it has already
   recovered (01c2e4a).

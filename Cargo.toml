@@ -15,3 +15,11 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_V
 # The binaries land on a Releases page; symbols there help nobody.
 [profile.release]
 strip = true
+
+# The window has no tests of its own (they live in src/gui.rs, in the library),
+# and its test harness would inherit build.rs's requireAdministrator manifest
+# and refuse to run unelevated.
+[[bin]]
+name = "bulkhead-gui"
+path = "src/bin/bulkhead-gui.rs"
+test = false
