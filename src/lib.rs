@@ -1060,7 +1060,13 @@ pub fn cmd_undo(disk_no: u32, file: &str, yes: bool) -> Res<()> {
 fn safe_component(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 0x20 { '_' } else { c })
+        .map(|c| {
+            if r#"\/:*?"<>|"#.contains(c) || (c as u32) < 0x20 {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let s = s.trim().trim_end_matches('.').to_string();
     if s.is_empty() || s == "." || s == ".." {
@@ -2580,8 +2586,7 @@ mod undelete_tests {
         for i in 100..600u64 {
             v.push((i, format!("d{i}"), i + 1));
         }
-        let d: HashMap<u64, (String, u64)> =
-            v.into_iter().map(|(i, n, p)| (i, (n, p))).collect();
+        let d: HashMap<u64, (String, u64)> = v.into_iter().map(|(i, n, p)| (i, (n, p))).collect();
         let (parts, rooted) = resolve_path(&d, 100);
         assert!(!rooted);
         assert!(parts.len() <= 65, "unbounded walk: {} deep", parts.len());
